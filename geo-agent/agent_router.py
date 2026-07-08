@@ -9,7 +9,13 @@ from typing import Any, Dict, List, Optional, Protocol
 
 from pydantic import BaseModel
 
-os.environ.pop("DATABRICKS_TOKEN", None)
+# Auth mode: if GIS_USER_PAT is injected (dev), use it and clear M2M creds.
+# Otherwise (prod/SP M2M), clear the injected user PAT to avoid multi-auth conflict.
+if os.environ.get("GIS_USER_PAT"):
+    os.environ.pop("DATABRICKS_CLIENT_ID", None)
+    os.environ.pop("DATABRICKS_CLIENT_SECRET", None)
+else:
+    os.environ.pop("DATABRICKS_TOKEN", None)
 
 _GA_AUTH_FILE = os.environ.get("GA_AUTH_FILE", "/databricks/authorization.ecp")
 _GA_LOCATOR_PATH = os.environ.get("GA_LOCATOR_PATH", "/databricks/geoanalytics/data/United_States.mmpk")
@@ -606,7 +612,9 @@ class RealAgent:
     def __init__(self):
         from databricks.sdk import WorkspaceClient
 
-        self.w = WorkspaceClient()
+        _host = os.environ.get("DATABRICKS_HOST", "https://adb-6884316730967297.17.azuredatabricks.net")
+        _token = os.environ.get("GIS_USER_PAT")
+        self.w = WorkspaceClient(host=_host, token=_token)
         self.cluster_id = os.environ.get("GIS_CLUSTER_ID", "0318-174606-fs95elli")
         self._context_id = None
         self._warm = False
