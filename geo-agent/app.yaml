@@ -1,0 +1,12 @@
+command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+env:
+  - name: AGENT_MODE
+    value: "real"
+  - name: GIS_CLUSTER_ID
+    value: "1031-100220-elaoqpmd"
+  - name: GENIE_SPACE_ID
+    value: "01f164dda12514ad8940be29a049870c"
+  - name: DATABRICKS_HOST
+    value: "https://adb-6884316730967297.17.azuredatabricks.net"
+  - name: DATABRICKS_TOKEN
+    valueFrom: user_pat
