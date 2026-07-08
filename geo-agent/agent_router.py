@@ -249,6 +249,85 @@ def _build_code(*lines: str) -> str:
     return "\n".join(line for line in lines if line is not None)
 
 
+_LAYER_CONFIG = {
+    "facilities": {
+        "table": _TBL_FACILITIES,
+        "label_col": "LOCALE_NAME",
+        "zip_col": "ZIP_CODE",
+        "select_fields": "LOCALE_NAME AS label, FACILITY_TYPE AS ftype, ADDRESS AS address, LATITUDE, LONGITUDE",
+        "select_fields_minimal": "LOCALE_NAME AS label, ADDRESS AS address, LATITUDE, LONGITUDE",
+        "keywords": ["facilit", "office", "plant", "p&dc", "ndc"],
+        "label": "facilities",
+    },
+    "boxes": {
+        "table": _TBL_BOXES,
+        "label_col": "BOX_NBR",
+        "zip_col": "ZIP5",
+        "select_fields": "BOX_NBR AS label, BOX_ADDRESS AS address, BOX_TYPE, LATITUDE, LONGITUDE",
+        "select_fields_minimal": "BOX_NBR AS label, BOX_ADDRESS AS address, LATITUDE, LONGITUDE",
+        "keywords": ["box", "collection", "cpms"],
+        "label": "collection boxes",
+    },
+}
+
+
+def _classify_layer(question: str, intent_data: Optional[Dict[str, Any]] = None) -> str:
+    if intent_data and intent_data.get("layer") in _LAYER_CONFIG:
+        return str(intent_data["layer"])
+    q = (question or "").lower()
+    for layer_name, cfg in _LAYER_CONFIG.items():
+        if any(keyword in q for keyword in cfg["keywords"]):
+            return layer_name
+    return "facilities"
+
+
+def _get_layer_config(question: str, intent_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return _LAYER_CONFIG[_classify_layer(question, intent_data)]
+
+
+_GEOJSON_TO_WKT_FN = """
+def _geojson_to_wkt(geom):
+    gtype = geom.get('type', '')
+    coords = geom.get('coordinates', [])
+    if gtype == 'Polygon':
+        rings = '(' + ','.join(
+            '(' + ','.join(f'{c[0]} {c[1]}' for c in ring) + ')' for ring in coords
+        ) + ')'
+        return f'POLYGON{rings}'
+    if gtype == 'MultiPolygon':
+        parts = [
+            '(' + ','.join('(' + ','.join(f'{c[0]} {c[1]}' for c in ring) + ')' for ring in poly) + ')'
+            for poly in coords
+        ]
+        return 'MULTIPOLYGON(' + ','.join(parts) + ')'
+    raise ValueError(f'Unsupported geometry type: {gtype}')
+"""
+
+
+_POLYGON_CONTAINMENT_FN = """
+def _collect_contained_features(fac_df, polygon_wkts, polygon_props=None):
+    from pyspark.sql import functions as F
+    polygon_props = polygon_props or [{} for _ in polygon_wkts]
+    seen_labels = set()
+    features = []
+    for idx, wkt in enumerate(polygon_wkts):
+        matches = fac_df.filter(F.expr(f"ST_Contains(ST_GeomFromWKT('{wkt}'), ST_Point(LONGITUDE, LATITUDE))")).collect()
+        for row in matches:
+            label = row['label']
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+            props = {k: row[k] for k in row.asDict().keys() if k not in ('LATITUDE', 'LONGITUDE')}
+            props.update(polygon_props[idx])
+            features.append({
+                'type': 'Feature',
+                'geometry': {'type': 'Point', 'coordinates': [round(float(row['LONGITUDE']), 6), round(float(row['LATITUDE']), 6)]},
+                'properties': props,
+            })
+    return features, len(seen_labels)
+"""
+
+
 def _parse_state_token(text: str) -> Optional[str]:
     txt = (text or "").strip(" ,.")
     if not txt:
@@ -368,12 +447,12 @@ def _classify_intent(question: str, history: Optional[List[Dict[str, str]]] = No
     if tier1:
         return tier1
     q = question.lower()
-    if any(w in q for w in ["top zip", "top zips", "rank zip", "ranking zip"]):
+    if re.search(r"\btop\s+\d*\s*zips?\b", q) or any(w in q for w in ["rank zip", "ranking zip"]):
         layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
         return {"intent": "zip_ranking", "layer": layer}
     if any(w in q for w in ["inside zip", "within zip", "in zip"]) and any(w in q for w in ["count", "how many"]):
         layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-        return {"intent": "spatial_containment", "layer": layer}
+        return {"intent": "zip_count", "layer": layer}
     if re.search(r"\b(nearest|closest)\b", q):
         layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
         return {"intent": "nearest", "layer": layer}
@@ -388,9 +467,13 @@ def _tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = Non
     q = question.lower()
 
     # SA containment: "show facilities in that service area", "what's inside the 5 min ring"
-    if any(kw in q for kw in _SA_CONTAIN_KW) or (
-        any(w in q for w in ["in", "within", "inside"]) and any(w in q for w in ["service area", "drive time", "ring", "isochrone"])
-    ):
+    # Use word-boundary matching for "in"/"within"/"inside" to avoid false positives (e.g., "min" containing "in")
+    _has_containment_word = any(kw in q for kw in _SA_CONTAIN_KW) or (
+        re.search(r"\b(?:in|within|inside)\b", q) and any(w in q for w in ["service area", "drive time", "ring", "isochrone"])
+    )
+    # Also require a layer keyword (facilities/boxes) to distinguish from plain SA generation requests
+    _has_layer_word = any(w in q for w in _LAYER_KW)
+    if _has_containment_word and _has_layer_word:
         layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
         # Try to get a specific break from the question (e.g., "in the 5 min service area")
         breaks_m = re.search(r"(\d+)\s*(?:min|minute)", q, re.I)
@@ -502,13 +585,13 @@ def _tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = Non
         if cname not in {"the", "a", "any", "each", "every"}:
             return {"intent": "boundary", "boundary_type": "county", "boundary_value": cname, "state": state_hit or ""}
 
-    if any(w in q for w in ["top zip", "top zips", "rank zip", "ranking zip"]):
+    if re.search(r"\btop\s+\d*\s*zips?\b", q) or any(w in q for w in ["rank zip", "ranking zip"]):
         layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
         return {"intent": "zip_ranking", "layer": layer}
 
     if zip_m and any(w in q for w in ["inside", "within", "in zip"]) and any(w in q for w in ["count", "how many"]):
         layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-        return {"intent": "spatial_containment", "layer": layer, "zip_code": zip_m.group(1)}
+        return {"intent": "zip_count", "layer": layer, "zip_code": zip_m.group(1)}
 
     if zip_m and any(w in q for w in _LAYER_KW):
         layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
@@ -644,7 +727,7 @@ class RealAgent:
                 return m.group(1).strip(" .,;:"), m.group(2).strip(" .,;:")
         return None, None
 
-    def _handle_route(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
+    def _handle_route(self, question: str, intent_data: Dict[str, Any] = None, history=None) -> GeoResponse:
         origin, dest = self._extract_route_locations(question, intent_data)
         if not origin or not dest:
             return GeoResponse(
@@ -723,7 +806,7 @@ class RealAgent:
         except Exception:
             return GeoResponse(answer=f"Route raw output: {str(data)[:1000]}", map_data=None, sources=["debug"])
 
-    def _handle_service_area(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
+    def _handle_service_area(self, question: str, intent_data: Dict[str, Any] = None, history: Optional[List[Dict[str, str]]] = None) -> GeoResponse:
         d = intent_data or {}
         zip_code = d.get("zip_code")
         origin_addr = d.get("origin") or ""
@@ -1069,7 +1152,7 @@ class RealAgent:
         except Exception:
             return GeoResponse(answer=f"Nearest service area raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
 
-    def _handle_nearest(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
+    def _handle_nearest(self, question: str, intent_data: Dict[str, Any] = None, history=None) -> GeoResponse:
         d = intent_data or {}
         ref_loc = d.get("reference_location") or d.get("origin") or ""
         layer = d.get("layer") or ("boxes" if any(w in question.lower() for w in ["box", "collection", "cpms"]) else "facilities")
@@ -1196,7 +1279,7 @@ class RealAgent:
         except Exception:
             return GeoResponse(answer=f"Boundary raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
 
-    def _handle_spatial_containment(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
+    def _handle_zip_count(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
         d = intent_data or {}
         zip_code = d.get("zip_code")
         layer = d.get("layer") or ("boxes" if any(w in question.lower() for w in ["box", "collection", "cpms"]) else "facilities")
@@ -1638,6 +1721,22 @@ class RealAgent:
         return GeoResponse(answer=answer, map_data=map_data, sources=["genie-space"])
 
 
+_INTENT_HANDLERS = {
+    "geocode":              lambda ra, q, d, h: ra._handle_geocode(q),
+    "route":                lambda ra, q, d, h: ra._handle_route(q, d, history=h),
+    "service_area":         lambda ra, q, d, h: ra._handle_service_area(q, d, history=h),
+    "sa_containment":       lambda ra, q, d, h: ra._handle_sa_containment(q, d, history=h),
+    "nearest_service_area": lambda ra, q, d, h: ra._handle_nearest_service_area(q, d, history=h),
+    "nearest":              lambda ra, q, d, h: ra._handle_nearest(q, d, history=h),
+    "boundary":             lambda ra, q, d, h: ra._handle_boundary(q, d),
+    "zip_count":            lambda ra, q, d, h: ra._handle_zip_count(q, d),
+    "spatial_lookup":       lambda ra, q, d, h: ra._handle_spatial_lookup(q, d),
+    "zip_ranking":          lambda ra, q, d, h: ra._handle_zip_ranking(q, d),
+    "weather_containment":  lambda ra, q, d, h: ra._handle_weather_containment(q, d),
+    "weather_alerts":       lambda ra, q, d, h: ra._handle_weather_alerts(q, d),
+}
+
+
 class GISAgent:
     name = "GISAgent (Recovered Router + GeoAnalytics Engine)"
 
@@ -1649,31 +1748,10 @@ class GISAgent:
         history_list = list(history or [])
         intent_data = _classify_intent(question, history_list)
         intent = intent_data.get("intent")
-
-        if intent == "geocode":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_geocode(question))
-        if intent == "route":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_route(question, intent_data, history=history_list))
-        if intent == "service_area":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_service_area(question, intent_data, history=history_list))
-        if intent == "sa_containment":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_sa_containment(question, intent_data, history=history_list))
-        if intent == "nearest_service_area":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_nearest_service_area(question, intent_data, history=history_list))
-        if intent == "nearest":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_nearest(question, intent_data, history=history_list))
-        if intent == "boundary":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_boundary(question, intent_data))
-        if intent == "spatial_containment":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_spatial_containment(question, intent_data))
-        if intent == "spatial_lookup":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_spatial_lookup(question, intent_data))
-        if intent == "zip_ranking":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_zip_ranking(question, intent_data))
-        if intent == "weather_containment":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_weather_containment(question, intent_data))
-        if intent == "weather_alerts":
-            return await loop.run_in_executor(None, lambda: self._real_agent._handle_weather_alerts(question, intent_data))
+        handler = _INTENT_HANDLERS.get(intent)
+        if handler:
+            ra = self._real_agent
+            return await loop.run_in_executor(None, lambda: handler(ra, question, intent_data, history_list))
         return await loop.run_in_executor(None, lambda: self._real_agent._handle_genie(question))
 
 

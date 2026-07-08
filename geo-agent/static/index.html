@@ -48,6 +48,16 @@ button:disabled{background:#4b5563;cursor:wait}
   border:2.5px solid rgba(255,255,255,0.85);
   box-shadow:0 1px 5px rgba(0,0,0,0.35);
 }
+/* Route stop markers */
+.route-stop{
+  display:flex;align-items:center;justify-content:center;
+  border-radius:50%;font-weight:700;color:#fff;
+  border:3px solid #fff;
+  box-shadow:0 2px 6px rgba(0,0,0,0.4);
+  font-size:14px;line-height:1;
+}
+.route-stop.start{background:#16a34a}
+.route-stop.end{background:#dc2626}
 /* Basemap switcher */
 #basemap-switcher{display:flex;gap:3px}
 .bm-btn{padding:3px 9px;background:#374151;color:#d1d5db;border:1px solid #4b5563;
@@ -132,6 +142,8 @@ function setBasemap(name) {
 let pointLayer = null;
 let polyLayer  = null;
 let haloLayer  = null;
+let routeStopLayer = null;
+let noaaLayer = null;
 
 const PIN_TYPES = [
   { match: ['p&dc','pdc','processing','distribution'], color:'#1d4ed8', label:'P&DC / Processing' },
@@ -379,22 +391,17 @@ function buildBoundaryLegend(boundaryType, features){
 
 function buildWeatherLegend(features){
   const el = document.getElementById('legend');
-  const SEV_ORDER = ['Extreme','Severe','Moderate','Minor','Unknown'];
-  const SEV_COLOR = {Extreme:'#dc2626',Severe:'#f97316',Moderate:'#eab308',Minor:'#22c55e',Unknown:'#6b7280'};
-  const found = {};
-  (features||[]).forEach(f=>{
-    const sev = f.properties && f.properties._severity;
-    if(sev && !found[sev]) found[sev] = SEV_COLOR[sev] || '#6b7280';
-  });
-  const rows = SEV_ORDER.filter(s => found[s]);
-  if(!rows.length){el.style.display='none';return;}
-  el.innerHTML='<div style="font-weight:600;margin-bottom:4px">NWS Alerts</div>'+
-    rows.map(s=>
-      `<div class="legend-row">`+
-      `<svg width="18" height="12"><rect x="1" y="2" width="16" height="8" rx="2"`+
-      ` fill="${found[s]}" fill-opacity="0.45" stroke="${found[s]}" stroke-width="2.5"/></svg>`+
-      `<span>${s}</span></div>`
-    ).join('');
+  el.innerHTML =
+    '<div style="font-weight:600;margin-bottom:4px">NWS Active Alerts</div>' +
+    '<div class="legend-row" style="gap:4px">' +
+    '<span style="font-size:10px;color:#555">Official NOAA symbology</span></div>' +
+    '<div class="legend-row" style="gap:4px">' +
+    '<a href="https://www.weather.gov/lwx/WarningsDefined" target="_blank" ' +
+    'style="font-size:10px;color:#2563eb;text-decoration:underline">Alert color reference</a></div>';
+  const ptCount = (features||[]).filter(f => isPoint(f)).length;
+  if(ptCount){
+    el.innerHTML += `<div class="legend-row" style="margin-top:4px"><span style="font-size:10px">${ptCount} affected facilities shown</span></div>`;
+  }
   el.style.display='block';
 }
 
@@ -445,6 +452,10 @@ function showMap(geojson){
   if(haloLayer)  map.removeLayer(haloLayer);
   if(polyLayer)  map.removeLayer(polyLayer);
   if(pointLayer) map.removeLayer(pointLayer);
+  if(routeStopLayer) map.removeLayer(routeStopLayer);
+  if(noaaLayer) map.removeLayer(noaaLayer);
+  routeStopLayer = L.layerGroup();
+  noaaLayer = null;
 
   const props        = geojson.properties || {};
   const colorByType  = !!props.color_by_type;
@@ -494,19 +505,21 @@ function showMap(geojson){
     }).addTo(map);
 
   } else if(weatherAlerts){
-    // ── NWS weather alerts: severity-based fill color ─────────────────────
-    haloLayer = L.geoJSON(geojson, {
-      filter: f => !isPoint(f),
-      style: ()=>({ color:'#ffffff', weight:6, opacity:0.45, fill:false, interactive:false })
+    // ── NWS weather alerts: official NOAA symbology via ArcGIS MapServer ──
+    noaaLayer = L.esri.dynamicMapLayer({
+      url: 'https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA/watch_warn_adv/MapServer',
+      opacity: 0.65,
+      attribution: 'NWS/NOAA'
     }).addTo(map);
-    polyLayer = L.geoJSON(geojson, {
-      filter: f => !isPoint(f),
-      style: f => {
-        const c = (f.properties && f.properties._color) || '#f97316';
-        return { color:c, weight:2.5, opacity:1, fill:true, fillColor:c, fillOpacity:0.18 };
-      },
-      onEachFeature: bindPopup
-    }).addTo(map);
+    // Still render any polygons from our GeoJSON (e.g. for containment overlay)
+    const hasGeoJsonPolys = (geojson.features||[]).some(f => !isPoint(f) && f.geometry);
+    if(hasGeoJsonPolys){
+      polyLayer = L.geoJSON(geojson, {
+        filter: f => !isPoint(f),
+        style: ()=>({ color:'transparent', weight:0, fill:false, interactive:true }),
+        onEachFeature: bindPopup
+      }).addTo(map);
+    }
   } else {
     // ── Default: white halo + red / heat polygon ─────────────────────────
     haloLayer = L.geoJSON(geojson, {
@@ -538,6 +551,36 @@ function showMap(geojson){
     onEachFeature: bindPopup
   }).addTo(pointLayer);
   pointLayer.addTo(map);
+
+  // ── Route stop markers: numbered circles at origin/destination ───────────
+  (geojson.features || []).forEach(f => {
+    if(!f.geometry || !f.properties) return;
+    const gtype = f.geometry.type;
+    const hasRoute = f.properties.route || f.properties.origin_match || f.properties.destination_match;
+    if(!hasRoute) return;
+    let coords = [];
+    if(gtype === 'LineString') coords = f.geometry.coordinates;
+    else if(gtype === 'MultiLineString') coords = f.geometry.coordinates.flat();
+    if(coords.length < 2) return;
+    const start = coords[0];
+    const end = coords[coords.length - 1];
+    const sz = 30;
+    const startIcon = L.divIcon({
+      html: `<div class="route-stop start" style="width:${sz}px;height:${sz}px">1</div>`,
+      className: '', iconSize:[sz,sz], iconAnchor:[sz/2,sz/2]
+    });
+    const endIcon = L.divIcon({
+      html: `<div class="route-stop end" style="width:${sz}px;height:${sz}px">2</div>`,
+      className: '', iconSize:[sz,sz], iconAnchor:[sz/2,sz/2]
+    });
+    L.marker([start[1],start[0]], {icon:startIcon})
+      .bindPopup(`<div style="color:#222;font-size:12px"><b>Start:</b> ${f.properties.origin_match||'Origin'}</div>`)
+      .addTo(routeStopLayer);
+    L.marker([end[1],end[0]], {icon:endIcon})
+      .bindPopup(`<div style="color:#222;font-size:12px"><b>End:</b> ${f.properties.destination_match||'Destination'}</div>`)
+      .addTo(routeStopLayer);
+  });
+  if(routeStopLayer.getLayers().length) routeStopLayer.addTo(map);
 
   // ── Legend dispatch ───────────────────────────────────────────────────────
   if(saRings)           buildSaLegend(geojson.features || []);
