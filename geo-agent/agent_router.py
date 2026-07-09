@@ -56,7 +56,8 @@ _SA_CONTAIN_KW = [
 
 # Regex for containment follow-ups: "within the 5 min service area", "in the drive time", etc.
 _SA_CONTAIN_RE = re.compile(
-    r'\b(in|within|inside)\b[^.!?\n]*\b(service[\s-]*area|drive[\s-]*time|isochrone)\b',
+    r'\b(?:in|within|inside)\b[^.!?\n]*\b(service[\s-]*area|drive[\s-]*time|isochrone)\b'
+    r'|\b(?:in|within|inside)\b[^.!?\n]*\b\d+[\s-]*min(?:ute)?s?\b[^.!?\n]*\b(?:drive|walk)\b',
     re.I,
 )
 
@@ -64,7 +65,8 @@ _SA_CONTAIN_RE = re.compile(
 # "travel time from A to B", "route from A to B", "directions from A to B", etc.
 _ROUTE_RE = re.compile(
     r'\b(?:route|directions?|travel\s*(?:time|distance)|driving\s*(?:time|distance)'
-    r'|how\s+(?:far|long)|drive\s+from|distance\s+(?:from|between))\b',
+    r'|how\s+(?:far|long)|distance\s+(?:from|between))\b'
+    r'|\bdrive\s+from\b[^.!?\n]{1,100}\bto\b',
     re.I,
 )
 
@@ -664,7 +666,13 @@ class RealAgent:
                 results = status.get("results", {})
                 if results.get("resultType") == "error":
                     return None, results.get("cause", "Unknown error")[:1000]
-                return results.get("data", ""), None
+                raw = results.get("data", "") or ""
+                # Strip trailing runtime warnings — find the last JSON line
+                json_line = next(
+                    (l.strip() for l in reversed(raw.split("\n")) if l.strip().startswith(("{", "["))),
+                    raw,
+                )
+                return json_line, None
             if status.get("status") in ("Error", "Cancelled"):
                 return None, "Command failed"
         return None, "Timed out"
@@ -862,7 +870,7 @@ class RealAgent:
                 f"    address_df = spark.createDataFrame([({json.dumps(origin_addr)},)], ['address'])",
                 "    gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields('Minimal')",
                 "    geo_rows = gc.run(address_df).collect()",
-                "    matched = [r for r in geo_rows if r['Status'] == 'M']",
+                "    matched = sorted([r for r in geo_rows if r['Status'] in ('M', 'T')], key=lambda r: -(r['Score'] or 0))",
                 "    if not matched:",
                 "        print(json.dumps({'error': 'Could not geocode origin'}))",
                 "        raise SystemExit()",
@@ -902,6 +910,7 @@ class RealAgent:
             "        row_d = row.asDict()",
             "        if row_d.get('sa_geojson'):",
             "            geom = json.loads(row_d['sa_geojson'])",
+            "            _gt=geom.get('type',''); geom['coordinates']=([[[round(c[0],5),round(c[1],5)] for c in r] for r in geom['coordinates']] if _gt=='Polygon' else [[[[round(c[0],5),round(c[1],5)] for c in r] for r in p] for p in geom['coordinates']]) if _gt in ('Polygon','MultiPolygon') else geom['coordinates']",
             "            bk_raw = row_d.get('ToBreak') or row_d.get('break_value') or row_d.get('CutoffMinutes') or row_d.get('cutoff') or ''",
             "            m = re.search(r'\\d+(?:\\.\\d+)?', str(bk_raw)) if bk_raw not in (None, '') else None",
             "            bk = str(int(float(m.group(0)))) if m else ''",
@@ -997,7 +1006,7 @@ class RealAgent:
                 f"    address_df = spark.createDataFrame([({json.dumps(origin_addr)},)], ['address'])",
                 "    gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields('Minimal')",
                 "    geo_rows = gc.run(address_df).collect()",
-                "    matched = [r for r in geo_rows if r['Status'] == 'M']",
+                "    matched = sorted([r for r in geo_rows if r['Status'] in ('M', 'T')], key=lambda r: -(r['Score'] or 0))",
                 "    if not matched:",
                 "        print(json.dumps({'error': 'Could not geocode origin'}))",
                 "        raise SystemExit()",
@@ -1055,18 +1064,24 @@ class RealAgent:
             "    # Broadcast the polygon WKT and filter",
             "    contained = fac_with_pt.withColumn('_in_sa', F.expr(f\"ST_Contains(ST_GeomFromWKT('{sa_wkt}'), ST_Point(LONGITUDE, LATITUDE))\")).filter('_in_sa = true')",
             "    results_rows = contained.drop('_pt', '_in_sa').collect()",
+            "    results_rows = results_rows[:100]  # cap to stay under API output limit",
             "    # Build output",
             "    features = []",
             "    for r in results_rows:",
             "        lat, lon = float(r['LATITUDE']), float(r['LONGITUDE'])",
             "        props = {k: r[k] for k in r.asDict().keys() if k not in ('LATITUDE', 'LONGITUDE', '_pt', '_in_sa')}",
+            f"        props['_layer'] = '{layer}'",  # 'boxes' or 'facilities'
             "        features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}, 'properties': props})",
             "    # Add the SA polygon outline",
             "    sa_geojson_str = spark.createDataFrame([(sa_wkt,)], ['wkt']).withColumn('gj', F.expr(\"ST_AsGeoJSON(ST_GeomFromWKT(wkt))\")).first()['gj']",
             "    if sa_geojson_str:",
             f"        sa_geom_parsed = json.loads(sa_geojson_str)",
+            "        _gtype = sa_geom_parsed.get('type','')",
+            "        _slim = lambda ring: [ring[i] for i in range(0, len(ring), max(1, len(ring)//200))] + ([ring[-1]] if ring and ring[0] != ring[-1] else [])",
+            "        if _gtype == 'Polygon': sa_geom_parsed['coordinates'] = [[[round(c[0],4),round(c[1],4)] for c in _slim(r)] for r in sa_geom_parsed['coordinates']]",
+            "        elif _gtype == 'MultiPolygon': sa_geom_parsed['coordinates'] = [[[[round(c[0],4),round(c[1],4)] for c in _slim(r)] for r in p] for p in sa_geom_parsed['coordinates']]",
             f"        features.append({{'type': 'Feature', 'geometry': sa_geom_parsed, 'properties': {{'service_area_label': '{break_single} minute service area', 'break_minutes': '{break_single}', 'color': '#22c55e'}}}})",
-            "    print(json.dumps({'type': 'FeatureCollection', 'features': features, 'properties': {'color_by_type': True}, 'count': len(results_rows), 'origin_label': origin_label}))",
+            "    print(json.dumps({'type': 'FeatureCollection', 'features': features, 'properties': {'color_by_type': True}, 'count': len(results_rows), 'origin_label': origin_label}, separators=(',', ':')))",
             "except SystemExit:",
             "    pass",
             "except Exception as e:",
@@ -1083,8 +1098,8 @@ class RealAgent:
             origin_lbl = parsed.get("origin_label", origin_addr)
             answer = f"Found {count} {kind} within the {break_single}-minute service area from {origin_lbl}."
             return GeoResponse(answer=answer, map_data=parsed if parsed.get("features") else None, sources=["geoanalytics-engine"])
-        except Exception:
-            return GeoResponse(answer=f"SA containment raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
+        except Exception as _exc:
+            return GeoResponse(answer=f"SA containment error ({type(_exc).__name__}: {_exc}) | data={str(data)[:200]}", map_data=None, sources=["debug"])
 
     def _handle_nearest_service_area(self, question: str, intent_data: Dict[str, Any] = None, history: Optional[List[Dict[str, str]]] = None) -> GeoResponse:
         d = intent_data or {}
@@ -1159,7 +1174,7 @@ class RealAgent:
             "        ref_df = spark.createDataFrame([(ref_loc_str,)], ['address'])",
             "        gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields('Minimal')",
             "        geo_rows = gc.run(ref_df).collect()",
-            "        matched = [r for r in geo_rows if r['Status'] == 'M']",
+            "        matched = sorted([r for r in geo_rows if r['Status'] in ('M', 'T')], key=lambda r: -(r['Score'] or 0))",
             "        if not matched:",
             "            print(json.dumps({'error': f'No facility found for query and could not geocode {ref_loc_str!r}'}))",
             "            raise SystemExit()",
@@ -1185,6 +1200,7 @@ class RealAgent:
             "        row_d = row.asDict()",
             "        if row_d.get('sa_geojson'):",
             "            geom = json.loads(row_d['sa_geojson'])",
+            "            _gt=geom.get('type',''); geom['coordinates']=([[[round(c[0],5),round(c[1],5)] for c in r] for r in geom['coordinates']] if _gt=='Polygon' else [[[[round(c[0],5),round(c[1],5)] for c in r] for r in p] for p in geom['coordinates']]) if _gt in ('Polygon','MultiPolygon') else geom['coordinates']",
             "            bk_raw = row_d.get('ToBreak') or row_d.get('break_value') or row_d.get('CutoffMinutes') or row_d.get('cutoff') or ''",
             "            m = re.search(r'\\d+(?:\\.\\d+)?', str(bk_raw)) if bk_raw not in (None, '') else None",
             "            bk = str(int(float(m.group(0)))) if m else ''",
@@ -1244,7 +1260,7 @@ class RealAgent:
             "try:",
             "    gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal')",
             "    rows = gc.run(ref_df).collect()",
-            "    matched = [r for r in rows if r['Status'] == 'M']",
+            "    matched = sorted([r for r in rows if r['Status'] in ('M', 'T')], key=lambda r: -(r['Score'] or 0))",
             "    if not matched:",
             "        print(json.dumps({'error': 'Could not geocode reference location'}))",
             "        raise SystemExit()",
@@ -1834,6 +1850,12 @@ class GISAgent:
             # origin is stated in the current message.
             if _SA_CONTAIN_RE.search(question):
                 _sa_params = _extract_sa_params_from_history(history_list)
+                if not _sa_params:
+                    _inl = re.search(
+                        r'(\d+)\s*[-\s]*min(?:ute)?s?\s*(?:drive|walk)(?:\s+time)?\s+from\s+(.+?)\s*[?!]?\s*$',
+                        question, re.I)
+                    if _inl:
+                        _sa_params = {"breaks": _inl.group(1), "origin": _inl.group(2).strip()}
                 if _sa_params:
                     _layer = "boxes" if any(w in q_lower for w in ["box", "collection", "cpms"]) else "facilities"
                     _pre = {
