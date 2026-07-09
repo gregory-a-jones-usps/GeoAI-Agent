@@ -8,5 +8,9 @@ env:
     value: "01f164dda12514ad8940be29a049870c"
   - name: DATABRICKS_HOST
     value: "https://adb-6884316730967297.17.azuredatabricks.net"
+  - name: DATABRICKS_TOKEN
+    valueFrom: user_pat
   - name: GIS_USER_PAT
     valueFrom: user_pat
+  - name: LLM_ENDPOINT
+    value: "mas-33c3b825-endpoint"

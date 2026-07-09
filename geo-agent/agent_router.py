@@ -9,13 +9,9 @@ from typing import Any, Dict, List, Optional, Protocol
 
 from pydantic import BaseModel
 
-# Auth mode: if GIS_USER_PAT is injected (dev), use it and clear M2M creds.
-# Otherwise (prod/SP M2M), clear the injected user PAT to avoid multi-auth conflict.
-if os.environ.get("GIS_USER_PAT"):
-    os.environ.pop("DATABRICKS_CLIENT_ID", None)
-    os.environ.pop("DATABRICKS_CLIENT_SECRET", None)
-else:
-    os.environ.pop("DATABRICKS_TOKEN", None)
+# Auth setup: remove SP M2M creds; use DATABRICKS_TOKEN (injected via user_pat resource)
+os.environ.pop("DATABRICKS_CLIENT_ID", None)
+os.environ.pop("DATABRICKS_CLIENT_SECRET", None)
 
 _GA_AUTH_FILE = os.environ.get("GA_AUTH_FILE", "/databricks/authorization.ecp")
 _GA_LOCATOR_PATH = os.environ.get("GA_LOCATOR_PATH", "/databricks/geoanalytics/data/United_States.mmpk")
@@ -26,16 +22,15 @@ _TBL_ZIP5 = os.environ.get("TBL_ZIP5", "edlprod.geo_analytics.usps_zip5")
 _TBL_FACILITIES = os.environ.get("TBL_FACILITIES", "edlprod.geo_analytics.facilities_fc")
 _TBL_BOXES = os.environ.get("TBL_BOXES", "edlprod.geo_analytics.cpms_co_t")
 
-_default_genie = (
-    os.environ.get("GENIE_SPACE_ID")
-    or os.environ.get("GENIE_SPACE_GEOSPATIAL")
-    or "01f16a705398161a9cc4f1ee00686c24"
+# Single Genie space — CPMS collection boxes only
+_CPMS_GENIE_SPACE = (
+    os.environ.get("GENIE_SPACE_CPMS")
+    or os.environ.get("GENIE_SPACE_ID")
+    or "01f164dda12514ad8940be29a049870c"
 )
-_GENIE_SPACES = {
-    "geospatial": _default_genie,
-    "collection_boxes": os.environ.get("GENIE_SPACE_CPMS") or _default_genie,
-    "delivery_points": os.environ.get("GENIE_SPACE_DPF") or _default_genie,
-}
+
+# LLM endpoint for intent classification
+_LLM_CLASSIFY_ENDPOINT = os.environ.get("LLM_ENDPOINT", "databricks-meta-llama-3-3-70b-instruct")
 
 _SA_COLORS = {
     "5": "#22c55e",
@@ -54,6 +49,62 @@ _SA_CONTAIN_KW = [
     "in the ring", "within the ring",
     "in that isochrone", "within that isochrone",
 ]
+
+# Regex for containment follow-ups: "within the 5 min service area", "in the drive time", etc.
+_SA_CONTAIN_RE = re.compile(
+    r'\b(in|within|inside)\b[^.!?\n]*\b(service[\s-]*area|drive[\s-]*time|isochrone)\b',
+    re.I,
+)
+
+# Regex for deterministic route classification:
+# "travel time from A to B", "route from A to B", "directions from A to B", etc.
+_ROUTE_RE = re.compile(
+    r'\b(?:route|directions?|travel\s*(?:time|distance)|driving\s*(?:time|distance)'
+    r'|how\s+(?:far|long)|drive\s+from|distance\s+(?:from|between))\b',
+    re.I,
+)
+
+# Regex for deterministic zip_count / spatial_lookup pre-checks
+_ZIP_PRESENT_RE = re.compile(r'\b\d{5}\b')
+_COUNT_QUERY_RE = re.compile(r'\bhow\s+many\b|\bcount\b|\btotal\b', re.I)
+_SHOW_QUERY_RE  = re.compile(r'\b(?:show|list|find|plot|map|display|where|which|what)\b', re.I)
+
+# Regex for deterministic weather_alerts / weather_containment pre-checks
+_WEATHER_RE = re.compile(
+    r'\bweather\b'
+    r'|\bactive\s+(?:nws\s+|noaa\s+)?alerts?\b'
+    r'|\b(?:nws|noaa)\s+alerts?\b'
+    r'|\bstorms?\s+(?:warnings?|watches?)\b'
+    r'|\btornado(?:\s+warnings?|\s+watches?)?\b'
+    r'|\bhurricanes?\b|\bblizzards?\b'
+    r'|\bflood\s+(?:warnings?|watches?)\b'
+    r'|\bwinter\s+storm\b|\bsevere\s+thunderstorm\b'
+    r'|\bhigh\s+wind\b|\bheat\s+advisory\b',
+    re.I,
+)
+
+# Regex for deterministic geocode pre-check
+_GEOCODE_RE = re.compile(
+    r'\bgeocod[ei]\w*\b'
+    r'|\bgeolocate\b'
+    r'|\b(?:find|get|what\s+(?:are|is))\s+(?:the\s+)?coordinates?\s+(?:for|of)\b'
+    r'|\bcoordinates?\s+(?:for|of)\b',
+    re.I,
+)
+
+# Regex for deterministic nearest / nearest_service_area pre-checks
+_NEAREST_RE = re.compile(
+    r'\b(?:nearest|closest)\b',
+    re.I,
+)
+
+# Regex for deterministic boundary pre-check
+_BOUNDARY_RE = re.compile(
+    r'\b(?:boundary|boundaries|outline)\s+(?:of|for)\b'
+    r'|\bshow\s+(?:me\s+)?(?:the\s+)?(?:boundary|outline|polygon|shape)\b'
+    r'|\b(?:zip3?|state|county|district|congressional|region|division|area)\s+(?:boundary|outline|polygon|border)\b',
+    re.I,
+)
 
 _LAYER_KW = ["facilit", "office", "plant", "box", "collection", "cpms", "p&dc", "ndc"]
 _SA_KW = ["drive time", "drivetime", "drive-time", "service area", "isochrone"]
@@ -448,162 +499,92 @@ def _extract_sa_params_from_history(history: Optional[List[Dict[str, str]]]) -> 
     return None
 
 
-def _classify_intent(question: str, history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-    tier1 = _tier1_classify(question, history=history)
-    if tier1:
-        return tier1
-    q = question.lower()
-    if re.search(r"\btop\s+\d*\s*zips?\b", q) or any(w in q for w in ["rank zip", "ranking zip"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-        return {"intent": "zip_ranking", "layer": layer}
-    if any(w in q for w in ["inside zip", "within zip", "in zip"]) and any(w in q for w in ["count", "how many"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-        return {"intent": "zip_count", "layer": layer}
-    if re.search(r"\b(nearest|closest)\b", q):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-        return {"intent": "nearest", "layer": layer}
-    if any(w in q for w in _BDY_KW):
-        zip_m = re.search(r"\b(\d{5})\b", question)
-        if zip_m:
-            return {"intent": "boundary", "boundary_type": "zip", "boundary_value": zip_m.group(1)}
-    return {"intent": "genie"}
+_INTENT_CLASSIFY_SYSTEM = """\
+You are an intent classifier for a USPS GIS web application. Given a user question and optional
+conversation history, return ONLY a valid JSON object — no explanation, no markdown fences.
+
+AVAILABLE INTENTS:
+geocod         → look up map coordinates for an address
+                 params: {"address": "<full address or place>"}
+route          → driving route / directions / travel time or distance between two places
+                 params: {} (locations extracted later)
+service_area   → generate drive-time rings / isochrone around an origin
+                 params: {"origin": "<address/place or null>", "zip_code": "<5-digit or null>", "breaks": "<comma-sep minutes e.g. 5,10,15>"}
+                 provide zip_code OR origin, not both
+sa_containment → find USPS facilities or collection boxes INSIDE a service area
+                 params: {"origin": "<resolved from history if vague>", "breaks": "<from history if needed>", "layer": "facilities|boxes"}
+nearest_service_area → find nearest facility to a reference, then show its service area rings
+                 params: {"reference_location": "<address/place>", "breaks": "<comma-sep minutes>"}
+nearest        → find the single nearest facility or collection box
+                 params: {"layer": "facilities|boxes", "reference_location": "<address/place>"}
+boundary       → show the map polygon for a geographic entity (ZIP, state, county, district, region, etc.)
+                 params: {"boundary_type": "zip|state|county|district|area|zip3|log_division|log_region|proc_division|proc_region|congressional|retail_area",
+                          "boundary_value": "<name or code>", "state": "<2-letter abbr or null>"}
+zip_count      → count how many facilities or boxes are in a specific ZIP code
+                 params: {"zip_code": "<5-digit>", "layer": "facilities|boxes"}
+spatial_lookup → plot facilities or boxes on a ZIP code map
+                 params: {"zip_code": "<5-digit>", "layer": "facilities|boxes"}
+zip_ranking    → rank ZIP codes by number of facilities or boxes
+                 params: {"layer": "facilities|boxes", "limit": <number or null>, "city": "<city or null>", "state": "<2-letter or null>"}
+weather_alerts → show active NWS weather alerts for a state or nationwide
+                 params: {"state": "<2-letter abbr or null>"}
+weather_containment → find facilities/boxes within active weather alert polygons
+                 params: {"layer": "facilities|boxes", "state": "<2-letter abbr or null>"}
+genie          → everything else: collection box counts, operational stats, box types, installation/removal
+                 dates, coverage by district/city/state, address lookups — any SQL question about USPS
+                 collection box data that the map tools above cannot handle
+                 params: {}
+
+LAYER RULES:
+- "box", "collection box", "CPMS", "blue box" → layer = "boxes"
+- "facility", "office", "plant", "P&DC", "NDC" → layer = "facilities"
+- Ambiguous or unspecified → layer = "facilities"
+
+HISTORY RULES:
+- If origin/location is vague ("that", "this", "it", "same location", "that facility"), resolve from history.
+- For sa_containment: extract the previous service area origin and breaks from the most recent assistant
+  message containing "Service area (" e.g. "Service area (5,10 min) from ZIP 94103".
+
+Return ONLY valid JSON.
+"""
 
 
-def _tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = None) -> Optional[Dict[str, Any]]:
-    q = question.lower()
-
-    # SA containment: "show facilities in that service area", "what's inside the 5 min ring"
-    # Use word-boundary matching for "in"/"within"/"inside" to avoid false positives (e.g., "min" containing "in")
-    _has_containment_word = any(kw in q for kw in _SA_CONTAIN_KW) or (
-        re.search(r"\b(?:in|within|inside)\b", q) and any(w in q for w in ["service area", "drive time", "ring", "isochrone"])
-    )
-    # Also require a layer keyword (facilities/boxes) to distinguish from plain SA generation requests
-    _has_layer_word = any(w in q for w in _LAYER_KW)
-    if _has_containment_word and _has_layer_word:
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-        # Try to get a specific break from the question (e.g., "in the 5 min service area")
-        breaks_m = re.search(r"(\d+)\s*(?:min|minute)", q, re.I)
-        specific_break = breaks_m.group(1) if breaks_m else None
-        # Look for SA params in history
-        sa_params = _extract_sa_params_from_history(history)
-        if sa_params:
-            origin = sa_params.get("origin", "")
-            breaks = specific_break or sa_params.get("breaks", "5")
-            return {"intent": "sa_containment", "layer": layer, "origin": origin, "breaks": breaks}
-        # No history SA context — check if question has enough info on its own
-        origin_m = re.search(r"(?:from|around|for)\s+(.+?)(?:\s+(?:in|within|inside)\b|$)", question.strip(), re.I)
-        if origin_m:
-            return {"intent": "sa_containment", "layer": layer, "origin": origin_m.group(1).strip(), "breaks": specific_break or "5"}
-
-    if "geocode" in q:
-        return {"intent": "geocode", "address": re.sub(r"\bgeocode\b", "", question, flags=re.I).strip()}
-    if re.search(r"\bwhere\s+is\b", q) and not re.search(r"\b\d{5}\b", q):
-        addr = re.sub(r"\bwhere\s+is\b", "", question, flags=re.I).strip().rstrip("?")
-        if addr and not any(w in q for w in ["boundary", "border", "county", "district", "state"]):
-            return {"intent": "geocode", "address": addr}
-
-    if re.search(r"\b(route|directions?)\s+(from|to)\b", q):
-        return {"intent": "route"}
-    if re.search(r"\b(?:travel|driving)\s+(?:time|distance)\s+from\s+.+?\s+to\s+.+$", q):
-        return {"intent": "route"}
-    if re.search(r"\b(?:how\s+far|how\s+long|travel\s+time|travel\s+distance|driving\s+time|driving\s+distance)\s+(?:to\s+drive|is\s+the\s+drive|driving|from)\b", q):
-        return {"intent": "route"}
-    if re.search(r"\bdrive\s+from\b", q):
-        return {"intent": "route"}
-    if re.search(r"\b(?:driving|travel)\s+(?:distance|time)\s+between\b", q):
-        return {"intent": "route"}
-    if re.search(r"\bdistance\s+between\b", q):
-        return {"intent": "route"}
-
-    if any(w in q for w in _WEATHER_KW) or re.search(r"\b(noaa|nws)\b", q):
-        # Parse state — check full names FIRST, then 2-letter abbreviations
-        state_tok = None
-        for name, abbr in sorted(_STATE_NAMES.items(), key=lambda kv: len(kv[0]), reverse=True):
-            if re.search(rf"\b{name}\b", q):
-                state_tok = abbr
-                break
-        if not state_tok:
-            _AMBIGUOUS_ABBRS = {"IN", "OR", "ME", "OH", "OK", "HI", "ID"}
-            for tok in re.findall(r"\b[A-Za-z]{2}\b", question):
-                upper = tok.upper()
-                if upper in _STATE_ABBRS and upper not in _AMBIGUOUS_ABBRS:
-                    state_tok = upper
-                    break
-            if not state_tok:
-                end_m = re.search(r"[,.]\s*([A-Za-z]{2})\s*$", question) or re.search(r"\b([A-Za-z]{2})\s*$", question)
-                if end_m and end_m.group(1).upper() in _STATE_ABBRS:
-                    state_tok = end_m.group(1).upper()
-        # Check if this is weather+containment (facilities within alert)
-        has_layer_kw = any(w in q for w in _LAYER_KW)
-        has_containment = any(w in q for w in ["within", "inside", "in the", "affected by", "impacted by"])
-        if has_layer_kw and has_containment:
-            layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-            return {"intent": "weather_containment", "layer": layer, "state": state_tok}
-        return {"intent": "weather_alerts", "state": state_tok}
-
-    zip_m = re.search(r"\b(\d{5})\b", question)
-
-    if zip_m and any(w in q for w in _SA_KW + ["minute", " min"]):
-        breaks_m = re.search(r"(\d+(?:\s*(?:,|and)\s*\d+)*)\s*(?:min|minute)", q, re.I)
-        breaks = re.sub(r"\s*(?:and|,)\s*", ",", breaks_m.group(1)).strip() if breaks_m else "5,10,15"
-        return {"intent": "service_area", "zip_code": zip_m.group(1), "breaks": breaks}
-
-    if not zip_m and any(w in q for w in _SA_KW):
-        breaks_m = re.search(r"(\d+(?:\s*(?:,|and)\s*\d+)*)\s*(?:min|minute)", q, re.I)
-        breaks = re.sub(r"\s*(?:and|,)\s*", ",", breaks_m.group(1)).strip() if breaks_m else "5,10,15"
-        if "nearest" in q:
-            loc_m = re.search(r"nearest\s+(?:facility|facilities|office|plant|station)?\s*(?:to\s+)?(.+?)$", question.strip(), re.I)
-            if loc_m:
-                return {"intent": "nearest_service_area", "reference_location": loc_m.group(1).strip(), "breaks": breaks}
-        origin_m = re.search(r"(?:from|around|for)\s+(.+?)$", question.strip(), re.I)
-        if origin_m:
-            return {"intent": "service_area", "origin": origin_m.group(1).strip(), "breaks": breaks}
-
-    if re.search(r"\b(nearest|closest)\b", q):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-        ref_m = re.search(r"\b(?:nearest|closest)\b.*?\b(?:to|from|near)\s+(.+?)$", question, re.I)
-        if ref_m:
-            return {"intent": "nearest", "layer": layer, "reference_location": ref_m.group(1).strip()}
-
-    has_bdy = any(w in q for w in _BDY_KW)
-    if zip_m and has_bdy and not any(w in q for w in _ALL_LAYER_WORDS):
-        return {"intent": "boundary", "boundary_type": "zip", "boundary_value": zip_m.group(1)}
-
-    state_hit = None
-    for tok in re.findall(r"\b[A-Za-z]{2}\b", question):
-        if tok.upper() in _STATE_ABBRS:
-            state_hit = tok.upper()
-            break
-    if not state_hit:
-        for name, abbr in _STATE_NAMES.items():
-            if name in q:
-                state_hit = abbr
-                break
-    if state_hit and not zip_m and has_bdy and not any(w in q for w in _ALL_LAYER_WORDS):
-        return {"intent": "boundary", "boundary_type": "state", "boundary_value": state_hit}
-
-    county_m = re.search(r"\b(\w+(?:\s+\w+)?)\s+county\b", q)
-    if county_m and has_bdy:
-        cwords = [w for w in county_m.group(1).strip().split()]
-        while len(cwords) > 1 and cwords[0] in {"show", "the", "a", "an", "display", "find", "map", "of", "for", "in", "outline", "polygon", "boundary", "get"}:
-            cwords = cwords[1:]
-        cname = " ".join(cwords)
-        if cname not in {"the", "a", "any", "each", "every"}:
-            return {"intent": "boundary", "boundary_type": "county", "boundary_value": cname, "state": state_hit or ""}
-
-    if re.search(r"\btop\s+\d*\s*zips?\b", q) or any(w in q for w in ["rank zip", "ranking zip"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-        return {"intent": "zip_ranking", "layer": layer}
-
-    if zip_m and any(w in q for w in ["inside", "within", "in zip"]) and any(w in q for w in ["count", "how many"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-        return {"intent": "zip_count", "layer": layer, "zip_code": zip_m.group(1)}
-
-    if zip_m and any(w in q for w in _LAYER_KW):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
-        return {"intent": "spatial_lookup", "layer": layer, "zip_code": zip_m.group(1)}
-
-    return None
+def _classify_intent_llm(
+    question: str,
+    w,
+    history: Optional[List[Dict[str, str]]] = None,
+    llm_endpoint: str = _LLM_CLASSIFY_ENDPOINT,
+) -> Dict[str, Any]:
+    """LLM-based intent classifier. Falls back to genie on any error."""
+    messages: List[Dict[str, str]] = [{"role": "system", "content": _INTENT_CLASSIFY_SYSTEM}]
+    for msg in (history or [])[-6:]:
+        if isinstance(msg, dict) and msg.get("role") in ("user", "assistant"):
+            messages.append({"role": msg["role"], "content": str(msg.get("content", ""))[:600]})
+    messages.append({"role": "user", "content": question})
+    try:
+        resp = w.api_client.do(
+            "POST",
+            f"/serving-endpoints/{llm_endpoint}/invocations",
+            body={"input": messages, "max_tokens": 256, "temperature": 0.0},
+        )
+        # MAS endpoint returns Responses API format: output[0].content[0].text
+        if isinstance(resp, dict) and "output" in resp:
+            raw = ((resp["output"][0]["content"][0]["text"]) or "").strip()
+        elif isinstance(resp, dict) and "choices" in resp:
+            raw = (resp["choices"][0]["message"]["content"] or "").strip()
+        else:
+            raise ValueError("Unexpected LLM response format")
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.M)
+        raw = re.sub(r"\s*```\s*$", "", raw, flags=re.M)
+        parsed = json.loads(raw)
+        # Normalise a common LLM typo
+        if parsed.get("intent") == "geocod":
+            parsed["intent"] = "geocode"
+        if parsed.get("intent") not in _INTENT_HANDLERS and parsed.get("intent") != "genie":
+            return {"intent": "genie"}
+        return parsed
+    except Exception:
+        return {"intent": "genie"}
 
 
 class RealAgent:
@@ -935,6 +916,14 @@ class RealAgent:
         origin_addr, history_loc = _resolve_location_text(origin_addr, history)
         if not origin_addr and history_loc:
             origin_addr = history_loc.get("address") or history_loc.get("city_state") or history_loc.get("zip_code") or ""
+
+        # Fall back to SA params from prior assistant message (e.g. "Service area (5,10 min) from ZIP 94103")
+        if not origin_addr:
+            sa_params = _extract_sa_params_from_history(history)
+            if sa_params:
+                origin_addr = sa_params.get("origin", "")
+                if not d.get("breaks"):
+                    break_val = sa_params.get("breaks", break_val)
 
         # Check if origin is a ZIP code
         zip_code = None
@@ -1304,12 +1293,31 @@ class RealAgent:
             sql = f"SELECT COUNT(*) AS cnt FROM {_TBL_FACILITIES} WHERE ZIP_CODE = '{zip_code}'"
             label = "facilities"
 
+        if layer == "boxes":
+            loc_sql = f"SELECT BOX_NBR AS label, BOX_ADDRESS AS address, BOX_TYPE, LATITUDE, LONGITUDE FROM {_TBL_BOXES} WHERE ZIP5 = '{zip_code}' AND LATITUDE != 0 AND LONGITUDE != 0"
+        else:
+            loc_sql = f"SELECT LOCALE_NAME AS label, FACILITY_TYPE AS ftype, ADDRESS AS address, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} WHERE ZIP_CODE = '{zip_code}' AND LATITUDE != 0 AND LONGITUDE != 0"
+
+        zip_geom_sql = f"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP = '{zip_code}'"
+
         code = _build_code(
             _SPARK_SETUP,
             "import json",
+            _NORM_RINGS_FN,
             "try:",
             f"    cnt = spark.sql({json.dumps(sql)}).first()['cnt']",
-            f"    print(json.dumps({{'zip_code': {json.dumps(zip_code)}, 'count': int(cnt), 'label': {json.dumps(label)}, 'method': 'zip_match'}}))",
+            "    features = []",
+            f"    bdy = spark.sql({json.dumps(zip_geom_sql)}).collect()",
+            "    if bdy and bdy[0][0]:",
+            "        geom = _convert_geom_display(json.loads(bdy[0][0]))",
+            f"        features.append({{'type': 'Feature', 'geometry': geom, 'properties': {{'ZIP': {json.dumps(zip_code)}}}}})",
+            f"    pts = spark.sql({json.dumps(loc_sql)}).collect()",
+            "    for r in pts:",
+            "        lat, lon = float(r['LATITUDE']), float(r['LONGITUDE'])",
+            "        if -90 <= lat <= 90 and -180 <= lon <= 180:",
+            "            props = {k: r[k] for k in r.asDict().keys() if k not in ('LATITUDE', 'LONGITUDE')}",
+            "            features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(lon,6), round(lat,6)]}, 'properties': props})",
+            f"    print(json.dumps({{'count': int(cnt), 'label': {json.dumps(label)}, 'zip_code': {json.dumps(zip_code)}, 'map': {{'type': 'FeatureCollection', 'features': features}}}}))",
             "except Exception as e:",
             "    print(json.dumps({'error': str(e)}))",
         )
@@ -1320,7 +1328,12 @@ class RealAgent:
             parsed = json.loads(data)
             if "error" in parsed:
                 return GeoResponse(answer=f"Containment error: {parsed['error']}", map_data=None, sources=["geo_analytics"])
-            return GeoResponse(answer=f"There are {parsed.get('count', 0)} {parsed.get('label', label)} with ZIP {zip_code}.", map_data=None, sources=["geoanalytics-engine"])
+            map_fc = parsed.get("map")
+            return GeoResponse(
+                answer=f"There are {parsed.get('count', 0)} {parsed.get('label', label)} in ZIP {zip_code}.",
+                map_data=map_fc if map_fc and map_fc.get("features") else None,
+                sources=["geo_analytics"],
+            )
         except Exception:
             return GeoResponse(answer=f"Containment raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
 
@@ -1659,12 +1672,7 @@ class RealAgent:
             return GeoResponse(answer=f"Weather containment raw output: {str(data_out)[:500]}", map_data=None, sources=["debug"])
 
     def _pick_genie_space(self, question: str) -> str:
-        q = question.lower()
-        if any(w in q for w in ["box", "collection box", "cpms", "blue box"]):
-            return _GENIE_SPACES["collection_boxes"]
-        if any(w in q for w in ["delivery", "dpf", "zip9", "mailbox", "delivery point"]):
-            return _GENIE_SPACES["delivery_points"]
-        return _GENIE_SPACES["geospatial"]
+        return _CPMS_GENIE_SPACE
 
     def _parse_genie_response(self, status: Dict[str, Any]) -> Dict[str, Any]:
         answer = ""
@@ -1754,13 +1762,85 @@ class GISAgent:
     async def handle(self, question: str, context=None, history=None) -> GeoResponse:
         loop = asyncio.get_event_loop()
         history_list = list(history or [])
-        intent_data = _classify_intent(question, history_list)
-        intent = intent_data.get("intent")
-        handler = _INTENT_HANDLERS.get(intent)
-        if handler:
-            ra = self._real_agent
-            return await loop.run_in_executor(None, lambda: handler(ra, question, intent_data, history_list))
-        return await loop.run_in_executor(None, lambda: self._real_agent._handle_genie(question))
+        ra = self._real_agent
+
+        def _run():
+            q_lower = question.lower()
+
+            # ── Deterministic SA-containment pre-check ──────────────────────────
+            # Catches follow-up questions like "what facilities are within the 5 min
+            # service area" that the LLM often misroutes to genie when no explicit
+            # origin is stated in the current message.
+            if _SA_CONTAIN_RE.search(question):
+                _sa_params = _extract_sa_params_from_history(history_list)
+                if _sa_params:
+                    _layer = "boxes" if any(w in q_lower for w in ["box", "collection", "cpms"]) else "facilities"
+                    _pre = {
+                        "intent": "sa_containment",
+                        "origin": _sa_params.get("origin", ""),
+                        "breaks": _sa_params.get("breaks", "5"),
+                        "layer": _layer,
+                    }
+                    return _INTENT_HANDLERS["sa_containment"](ra, question, _pre, history_list)
+
+            # ── Deterministic route pre-check ────────────────────────────────────
+            # Catches "travel time from A to B", "route from A to B", etc. that
+            # the LLM sometimes misroutes to genie.
+            if _ROUTE_RE.search(question):
+                return _INTENT_HANDLERS["route"](ra, question, {}, history_list)
+
+            # ── Deterministic weather pre-checks ──────────────────────────────────
+            # Catches "active weather alerts in TN", "tornado warnings in Texas", etc.
+            if _WEATHER_RE.search(question):
+                if any(w in q_lower for w in ["box", "collection", "cpms", "facilit", "office", "plant"]):
+                    return _INTENT_HANDLERS["weather_containment"](ra, question, {}, history_list)
+                return _INTENT_HANDLERS["weather_alerts"](ra, question, {}, history_list)
+
+            # ── Deterministic nearest_service_area pre-check ─────────────────────
+            # "service area from the nearest facility to X" — must come before nearest.
+            if _NEAREST_RE.search(question) and re.search(
+                r'\bservice\s+area\b|\bdrive.?time\b|\bisochrone\b', question, re.I
+            ):
+                return _INTENT_HANDLERS["nearest_service_area"](ra, question, {}, history_list)
+
+            # ── Deterministic nearest pre-check ──────────────────────────────────
+            # "nearest/closest facility/box to X"
+            if _NEAREST_RE.search(question) and any(
+                w in q_lower for w in ["facilit", "office", "plant", "p&dc", "ndc", "box", "collection", "cpms"]
+            ):
+                return _INTENT_HANDLERS["nearest"](ra, question, {}, history_list)
+
+            # ── Deterministic geocode pre-check ───────────────────────────────────
+            # "geocode X", "geolocate X", "find/get coordinates of X"
+            if _GEOCODE_RE.search(question):
+                return _INTENT_HANDLERS["geocode"](ra, question, {}, history_list)
+
+            # ── Deterministic boundary pre-check ─────────────────────────────────
+            # "show the boundary of TN", "ZIP 38118 boundary", etc.
+            if _BOUNDARY_RE.search(question):
+                return _INTENT_HANDLERS["boundary"](ra, question, {}, history_list)
+
+            # ── Deterministic zip_count / spatial_lookup pre-checks ──────────────
+            # Fires when a 5-digit ZIP is present and a layer keyword is present.
+            _has_zip = bool(_ZIP_PRESENT_RE.search(question))
+            _has_layer_kw = any(w in q_lower for w in ["box", "collection", "cpms", "facilit", "office", "plant"])
+            if _has_zip and _has_layer_kw:
+                if _COUNT_QUERY_RE.search(question):
+                    return _INTENT_HANDLERS["zip_count"](ra, question, {}, history_list)
+                if _SHOW_QUERY_RE.search(question):
+                    return _INTENT_HANDLERS["spatial_lookup"](ra, question, {}, history_list)
+
+            intent_data = _classify_intent_llm(
+                question, ra.w, history_list,
+                llm_endpoint=os.environ.get("LLM_ENDPOINT", _LLM_CLASSIFY_ENDPOINT),
+            )
+            intent = intent_data.get("intent", "genie")
+            handler = _INTENT_HANDLERS.get(intent)
+            if handler:
+                return handler(ra, question, intent_data, history_list)
+            return ra._handle_genie(question)
+
+        return await loop.run_in_executor(None, _run)
 
 
 _router: Optional[GISAgent] = None
