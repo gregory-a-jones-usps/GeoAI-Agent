@@ -28,6 +28,10 @@ _CPMS_GENIE_SPACE = (
     or os.environ.get("GENIE_SPACE_ID")
     or "01f164dda12514ad8940be29a049870c"
 )
+_FACILITIES_GENIE_SPACE = (
+    os.environ.get("GENIE_SPACE_FACILITIES")
+    or "01f16b0f00271be69d67170685241974"
+)
 
 # LLM endpoint for intent classification
 _LLM_CLASSIFY_ENDPOINT = os.environ.get("LLM_ENDPOINT", "databricks-meta-llama-3-3-70b-instruct")
@@ -105,6 +109,22 @@ _BOUNDARY_RE = re.compile(
     r'|\b(?:zip3?|state|county|district|congressional|region|division|area)\s+(?:boundary|outline|polygon|border)\b',
     re.I,
 )
+
+# Regex for deterministic service_area / nearest_service_area pre-checks
+# Catches "create/show/generate a X-min service area around/from Y"
+_SA_GEN_RE = re.compile(
+    r'\b(?:create|generate|build|draw|run|show|give|plot|display)\b[^.!?\n]*\bservice\s+area\b'
+    r'|\bservice\s+area\s+(?:around|from|for|near|at)\b'
+    r'|\b\d+[\s-]*min(?:ute)?s?\s+(?:service\s+area|drive.?time|isochrone)\b'
+    r'|\bisochrone\s+(?:around|from|for|near|at)\b',
+    re.I,
+)
+# USPS facility type keywords — trigger nearest_service_area instead of service_area
+_FACILITY_TYPE_KW = [
+    "rpdc", "ndc", "p&dc", "adc", "aadc", "amc", "bmc", "cfs", "vmf",
+    "distribution center", "processing center", "processing facility",
+    "network distribution", "mail center", "post office",
+]
 
 _LAYER_KW = ["facilit", "office", "plant", "box", "collection", "cpms", "p&dc", "ndc"]
 _SA_KW = ["drive time", "drivetime", "drive-time", "service area", "isochrone"]
@@ -1076,6 +1096,36 @@ class RealAgent:
         if not ref_loc:
             return GeoResponse(answer="Please specify a location for the nearest facility search.", map_data=None, sources=["geoanalytics-engine"])
 
+        # ── Extract facility-type hint and city/state from question + ref_loc ──────
+        _fac_type_hints = [
+            ("rpdc", "RPDC"), ("ndc", "NDC"), ("p&dc", "P&DC"), ("adc", "ADC"),
+            ("aadc", "AADC"), ("amc", "AMC"), ("bmc", "BMC"), ("cfs", "CFS"), ("vmf", "VMF"),
+            ("distribution center", "DISTRIBUTION"), ("processing center", "PROCESSING"),
+            ("mail center", "MAIL"), ("network distribution", "NDC"),
+        ]
+        q_lower_h = question.lower()
+        fac_type_filter = next((fv for hint, fv in _fac_type_hints if hint in q_lower_h), None)
+
+        _cs_m = re.match(r'^\s*([A-Za-z][A-Za-z\s]+?)\s*(?:,\s*([A-Za-z]{2}))?\s*$', ref_loc.strip())
+        city_filter = (_cs_m.group(1).strip().upper() if _cs_m else "")
+        state_filter = (_cs_m.group(2).upper() if _cs_m and _cs_m.group(2) else "")
+
+        # Direct-lookup SQL: find facility by type + state/city — no geocoding needed
+        _direct_conds = ["LATITUDE IS NOT NULL", "LONGITUDE IS NOT NULL",
+                         "CAST(LATITUDE AS DOUBLE) != 0", "CAST(LONGITUDE AS DOUBLE) != 0"]
+        if fac_type_filter:
+            # FACILITY_TYPE stores codes (NET_FACIL, MAIL_PROC, etc.) — not names like RPDC.
+            # Filter on LOCALE_NAME which contains the actual name (e.g. "MEMPHIS TN RPDC").
+            _direct_conds.append(f"UPPER(LOCALE_NAME) LIKE '%{fac_type_filter}%'")
+        if state_filter:
+            _direct_conds.append(f"UPPER(STATE) = '{state_filter}'")
+        elif city_filter:
+            _direct_conds.append(f"UPPER(CITY) LIKE '%{city_filter}%'")
+        direct_sql = (
+            f"SELECT LOCALE_NAME, FACILITY_TYPE, CITY, STATE, LATITUDE, LONGITUDE "
+            f"FROM {_TBL_FACILITIES} WHERE {' AND '.join(_direct_conds)} LIMIT 10"
+        )
+
         code = _build_code(
             _SPARK_SETUP,
             _GA_SETUP,
@@ -1088,28 +1138,39 @@ class RealAgent:
             f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
             f"network_path = {json.dumps(_GA_NETWORK_PATH)}",
             f"break_minutes = [{break_minutes}]",
-            f"ref_df = spark.createDataFrame([({json.dumps(ref_loc)},)], ['address'])",
-            f"fac_sql = {json.dumps(f'SELECT LOCALE_NAME, FACILITY_TYPE, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL')}",
+            f"direct_sql = {json.dumps(direct_sql)}",
+            f"ref_loc_str = {json.dumps(ref_loc)}",
+            f"fac_sql = {json.dumps(f'SELECT LOCALE_NAME, FACILITY_TYPE, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL AND CAST(LATITUDE AS DOUBLE) != 0')}",
             "def _hav(lat1, lon1, lat2, lon2):",
             "    R = 3959.0",
             "    dlat = radians(lat2-lat1); dlon = radians(lon2-lon1)",
             "    a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2",
             "    return 2*R*asin(sqrt(a))",
             "try:",
-            "    gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields('Minimal')",
-            "    geo_rows = gc.run(ref_df).collect()",
-            "    matched = [r for r in geo_rows if r['Status'] == 'M']",
-            "    if not matched:",
-            "        print(json.dumps({'error': 'Could not geocode reference location'}))",
-            "        raise SystemExit()",
-            "    ref_lon = matched[0]['geocode_location'].x",
-            "    ref_lat = matched[0]['geocode_location'].y",
-            "    fac_rows = spark.sql(fac_sql).collect()",
-            "    nearest = min(fac_rows, key=lambda r: _hav(ref_lat, ref_lon, float(r['LATITUDE']), float(r['LONGITUDE'])))",
-            "    origin_lat = float(nearest['LATITUDE'])",
-            "    origin_lon = float(nearest['LONGITUDE'])",
-            "    origin_label = nearest['LOCALE_NAME']",
-            "    dist_mi = round(_hav(ref_lat, ref_lon, origin_lat, origin_lon), 2)",
+            "    # ── Stage 1: direct table lookup (no geocoding) ───────────────────────",
+            "    direct_rows = spark.sql(direct_sql).collect()",
+            "    if direct_rows:",
+            "        origin_lat = float(direct_rows[0]['LATITUDE'])",
+            "        origin_lon = float(direct_rows[0]['LONGITUDE'])",
+            "        origin_label = direct_rows[0]['LOCALE_NAME']",
+            "        dist_mi = 0.0",
+            "    else:",
+            "        # ── Stage 2: geocode city/state + haversine nearest ───────────────",
+            "        ref_df = spark.createDataFrame([(ref_loc_str,)], ['address'])",
+            "        gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields('Minimal')",
+            "        geo_rows = gc.run(ref_df).collect()",
+            "        matched = [r for r in geo_rows if r['Status'] == 'M']",
+            "        if not matched:",
+            "            print(json.dumps({'error': f'No facility found for query and could not geocode {ref_loc_str!r}'}))",
+            "            raise SystemExit()",
+            "        ref_lon = matched[0]['geocode_location'].x",
+            "        ref_lat = matched[0]['geocode_location'].y",
+            "        fac_rows = spark.sql(fac_sql).collect()",
+            "        nearest = min(fac_rows, key=lambda r: _hav(ref_lat, ref_lon, float(r['LATITUDE']), float(r['LONGITUDE'])))",
+            "        origin_lat = float(nearest['LATITUDE'])",
+            "        origin_lon = float(nearest['LONGITUDE'])",
+            "        origin_label = nearest['LOCALE_NAME']",
+            "        dist_mi = round(_hav(ref_lat, ref_lon, origin_lat, origin_lon), 2)",
             "    point_df = spark.createDataFrame([(float(origin_lon), float(origin_lat), str(origin_label))], ['_lon', '_lat', 'FacilityName']).withColumn('SHAPE', ga_fn.point('_lon', '_lat'))",
             "    sa = CreateServiceAreas()",
             "    sa.setNetwork(network_path)",
@@ -1809,6 +1870,50 @@ class GISAgent:
                 w in q_lower for w in ["facilit", "office", "plant", "p&dc", "ndc", "box", "collection", "cpms"]
             ):
                 return _INTENT_HANDLERS["nearest"](ra, question, {}, history_list)
+
+            # ── Deterministic service area generation pre-check ──────────────────
+            # Catches "create/show/generate a 5-min service area around X".
+            # Use LLM only for parameter extraction; override the routing decision.
+            if _SA_GEN_RE.search(question):
+                _sa_data = _classify_intent_llm(
+                    question, ra.w, history_list,
+                    llm_endpoint=os.environ.get("LLM_ENDPOINT", _LLM_CLASSIFY_ENDPOINT),
+                )
+                # ── Regex fallback for breaks ─────────────────────────────────────
+                if not _sa_data.get("breaks"):
+                    _brk_m = re.search(r'(\d+(?:[,\s]+(?:and\s+)?\d+)*)\s*[-\s]*min', question, re.I)
+                    if _brk_m:
+                        _sa_data["breaks"] = re.sub(r'\s*(?:and|,)\s*', ',', _brk_m.group(1)).strip(',')
+                # ── Determine intent and ensure location field is populated ────────
+                if any(kw in q_lower for kw in _FACILITY_TYPE_KW):
+                    _sa_data["intent"] = "nearest_service_area"
+                    # reference_location: check LLM extraction, then regex fallback
+                    if not (_sa_data.get("reference_location") or _sa_data.get("origin")):
+                        # Prefer trailing 'in CITY, ST' (excludes the facility name)
+                        _loc_m = re.search(
+                            r'\bin\s+([A-Za-z][A-Za-z\s]+(?:,\s*[A-Z]{2})?)\s*[?!]?\s*$',
+                            question, re.I
+                        )
+                        if not _loc_m:
+                            _loc_m = re.search(
+                                r'\b(?:around|near|at|from)\s+(.+?)\s*[?!]?\s*$',
+                                question, re.I
+                            )
+                        _sa_data["reference_location"] = _loc_m.group(1).strip() if _loc_m else question
+                else:
+                    _sa_data["intent"] = "service_area"
+                    # origin: check LLM extraction, then regex fallback
+                    if not (_sa_data.get("origin") or _sa_data.get("zip_code")):
+                        _orig_m = re.search(
+                            r'\bservice\s+area\s+(?:around|from|for|near|at)\s+(.+?)\s*[?!]?\s*$'
+                            r'|\b(?:around|from|near|at)\s+(.+?)\s*[?!]?\s*$',
+                            question, re.I
+                        )
+                        if _orig_m:
+                            _sa_data["origin"] = (_orig_m.group(1) or _orig_m.group(2) or "").strip()
+                _sa_handler = _INTENT_HANDLERS.get(_sa_data["intent"])
+                if _sa_handler:
+                    return _sa_handler(ra, question, _sa_data, history_list)
 
             # ── Deterministic geocode pre-check ───────────────────────────────────
             # "geocode X", "geolocate X", "find/get coordinates of X"

@@ -6,6 +6,8 @@ env:
     value: "1031-100220-elaoqpmd"
   - name: GENIE_SPACE_ID
     value: "01f164dda12514ad8940be29a049870c"
+  - name: GENIE_SPACE_FACILITIES
+    value: "01f16b0f00271be69d67170685241974"
   - name: DATABRICKS_HOST
     value: "https://adb-6884316730967297.17.azuredatabricks.net"
   - name: DATABRICKS_TOKEN
