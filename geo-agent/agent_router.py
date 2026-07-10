@@ -123,12 +123,13 @@ _SA_GEN_RE = re.compile(
 )
 # USPS facility type keywords — trigger nearest_service_area instead of service_area
 _FACILITY_TYPE_KW = [
-    "rpdc", "ndc", "p&dc", "adc", "aadc", "amc", "bmc", "cfs", "vmf",
+    "sdc", "rpdc", "ndc", "p&dc", "adc", "aadc", "amc", "bmc", "cfs", "vmf",
     "distribution center", "processing center", "processing facility",
     "network distribution", "mail center", "post office",
 ]
 
-_LAYER_KW = ["facilit", "office", "plant", "box", "collection", "cpms", "p&dc", "ndc"]
+_LAYER_KW = ["facilit", "office", "plant", "box", "collection", "cpms",
+             "p&dc", "ndc", "sdc", "rpdc", "adc", "aadc", "amc", "bmc", "cfs", "vmf"]
 _SA_KW = ["drive time", "drivetime", "drive-time", "service area", "isochrone"]
 _BDY_KW = ["boundary", "border", "outline", "polygon", "shape of"]
 _WEATHER_KW = [
@@ -1113,7 +1114,7 @@ class RealAgent:
 
         # ── Extract facility-type hint and city/state from question + ref_loc ──────
         _fac_type_hints = [
-            ("rpdc", "RPDC"), ("ndc", "NDC"), ("p&dc", "P&DC"), ("adc", "ADC"),
+            ("sdc", "SDC"), ("rpdc", "RPDC"), ("ndc", "NDC"), ("p&dc", "P&DC"), ("adc", "ADC"),
             ("aadc", "AADC"), ("amc", "AMC"), ("bmc", "BMC"), ("cfs", "CFS"), ("vmf", "VMF"),
             ("distribution center", "DISTRIBUTION"), ("processing center", "PROCESSING"),
             ("mail center", "MAIL"), ("network distribution", "NDC"),
@@ -1240,8 +1241,20 @@ class RealAgent:
             sql = f"SELECT BOX_NBR AS label, BOX_ADDRESS AS address, LATITUDE, LONGITUDE FROM {_TBL_BOXES} WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL AND LATITUDE != 0 AND LONGITUDE != 0"
             kind = "collection box"
         else:
-            sql = f"SELECT LOCALE_NAME AS label, ADDRESS AS address, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL AND LATITUDE != 0 AND LONGITUDE != 0"
-            kind = "facility"
+            _q = question.lower()
+            _net_types = {"sdc": "SDC", "s&dc": "SDC", "rpdc": "RPDC", "lpc": "LPC"}
+            _net_sub = next((v for k, v in _net_types.items() if k in _q), None)
+            if _net_sub:
+                _nsql = ("SELECT facility_name AS label, facility_sub_type_desc AS address,"
+                         " latitude AS LATITUDE, longitude AS LONGITUDE"
+                         " FROM edlprod.geo_analytics.facility_network"
+                         f" WHERE UPPER(facility_sub_type) = {repr(_net_sub)}"
+                         " AND latitude IS NOT NULL AND longitude IS NOT NULL")
+                sql = _nsql
+                kind = _net_sub
+            else:
+                sql = f"SELECT LOCALE_NAME AS label, ADDRESS AS address, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL AND LATITUDE != 0 AND LONGITUDE != 0"
+                kind = "facility"
 
         code = _build_code(
             _SPARK_SETUP,
