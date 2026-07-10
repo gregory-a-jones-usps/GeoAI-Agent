@@ -789,6 +789,12 @@ class RealAgent:
             f"        destination_match = matched[1]['Match_addr'] or {json.dumps(dest)}",
             "        if row and row['route_geojson']:",
             "            geom = json.loads(row['route_geojson'])",
+            "            # Reduce vertex count so output stays under API limit",
+            "            if geom.get('type') == 'LineString':",
+            "                _c = geom['coordinates']; _step = max(1, len(_c)//500)",
+            "                _s = [[round(p[0],5),round(p[1],5)] for p in _c[::_step]]",
+            "                if _c and _s[-1] != [round(_c[-1][0],5),round(_c[-1][1],5)]: _s.append([round(_c[-1][0],5),round(_c[-1][1],5)])",
+            "                geom['coordinates'] = _s",
             "            travel_time_min = round(float(row['travel_time']), 1) if row['travel_time'] is not None else None",
             "            travel_distance_mi = round(float(row['travel_distance']) / 1609.34, 2) if row['travel_distance'] is not None else None",
             f"            route_name = {json.dumps(origin + ' to ' + dest)}",
@@ -1256,6 +1262,10 @@ class RealAgent:
                 sql = f"SELECT LOCALE_NAME AS label, ADDRESS AS address, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL AND LATITUDE != 0 AND LONGITUDE != 0"
                 kind = "facility"
 
+        # Extract requested count from question ("nearest 5 facilities")
+        _n_m = re.search(r'\b(?:nearest|closest)\s+(\d+)\b|\b(\d+)\s+(?:nearest|closest)\b', question, re.I)
+        top_n = int(_n_m.group(1) or _n_m.group(2)) if _n_m else 1
+        top_n = max(1, min(top_n, 20))
         code = _build_code(
             _SPARK_SETUP,
             _GA_SETUP,
@@ -1280,9 +1290,16 @@ class RealAgent:
             "    ref_lon = matched[0]['geocode_location'].x",
             "    ref_lat = matched[0]['geocode_location'].y",
             "    candidates = spark.sql(query_sql).collect()",
-            "    best = min(candidates, key=lambda r: _hav(ref_lat, ref_lon, float(r['LATITUDE']), float(r['LONGITUDE'])))",
-            "    dist = round(_hav(ref_lat, ref_lon, float(best['LATITUDE']), float(best['LONGITUDE'])), 2)",
-            "    print(json.dumps({'label': best['label'], 'address': best['address'], 'distance_mi': dist, 'coordinates': [float(best['LONGITUDE']), float(best['LATITUDE'])]}))",
+            f"    top_n = {top_n}",
+            "    ranked = sorted(candidates, key=lambda r: _hav(ref_lat, ref_lon, float(r['LATITUDE']), float(r['LONGITUDE'])))[:top_n]",
+            "    features = []",
+            "    for r in ranked:",
+            "        d = round(_hav(ref_lat, ref_lon, float(r['LATITUDE']), float(r['LONGITUDE'])), 2)",
+            "        props = {k: r[k] for k in r.asDict().keys() if k not in ('LATITUDE','LONGITUDE')}",
+            "        props['distance_mi'] = d",
+            f"        props['_layer'] = '{layer}'",
+            "        features.append({'type':'Feature','geometry':{'type':'Point','coordinates':[round(float(r['LONGITUDE']),6),round(float(r['LATITUDE']),6)]},'properties':props})",
+            "    print(json.dumps({'type':'FeatureCollection','features':features,'count':len(features),'nearest_label':ranked[0]['label'] if ranked else ''}))",
             "except SystemExit:",
             "    pass",
             "except Exception as e:",
@@ -1295,8 +1312,16 @@ class RealAgent:
             parsed = json.loads(data)
             if isinstance(parsed, dict) and "error" in parsed:
                 return GeoResponse(answer=f"Nearest search error: {parsed['error']}", map_data=None, sources=["geoanalytics-engine"])
-            map_data = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": parsed.get("coordinates", [0, 0])}, "properties": {"label": parsed.get("label"), "address": parsed.get("address"), "distance_mi": parsed.get("distance_mi")}}]}
-            return GeoResponse(answer=f"Nearest {kind} to {ref_loc}: {parsed.get('label')} ({parsed.get('distance_mi')} mi)", map_data=map_data, sources=["geoanalytics-engine"])
+            features = parsed.get("features", [])
+            if not features:
+                return GeoResponse(answer=f"No {kind} found near {ref_loc}.", map_data=None, sources=["geoanalytics-engine"])
+            if len(features) == 1:
+                p = features[0]["properties"]
+                answer = f"Nearest {kind} to {ref_loc}: {p.get('label')} ({p.get('distance_mi')} mi)"
+            else:
+                lines_out = [f"{i+1}. {f['properties'].get('label')} ({f['properties'].get('distance_mi')} mi)" for i, f in enumerate(features)]
+                answer = f"Nearest {len(features)} {kind}s to {ref_loc}:\n" + "\n".join(lines_out)
+            return GeoResponse(answer=answer, map_data=parsed, sources=["geoanalytics-engine"])
         except Exception:
             return GeoResponse(answer=f"Nearest raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
 
