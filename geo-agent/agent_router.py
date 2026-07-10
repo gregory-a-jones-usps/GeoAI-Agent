@@ -1393,6 +1393,7 @@ class RealAgent:
             "        lat, lon = float(r['LATITUDE']), float(r['LONGITUDE'])",
             "        if -90 <= lat <= 90 and -180 <= lon <= 180:",
             "            props = {k: r[k] for k in r.asDict().keys() if k not in ('LATITUDE', 'LONGITUDE')}",
+            f"            props['_layer'] = '{layer}'",
             "            features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(lon,6), round(lat,6)]}, 'properties': props})",
             f"    print(json.dumps({{'count': int(cnt), 'label': {json.dumps(label)}, 'zip_code': {json.dumps(zip_code)}, 'map': {{'type': 'FeatureCollection', 'features': features}}}}))",
             "except Exception as e:",
@@ -1444,12 +1445,12 @@ class RealAgent:
                 "for r in rows:",
                 "    lat, lon = float(r['LATITUDE']), float(r['LONGITUDE'])",
                 "    if -90 <= lat <= 90 and -180 <= lon <= 180:",
-                "        features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}, 'properties': {'BOX_NBR': r['BOX_NBR'], 'BOX_ADDRESS': r['BOX_ADDRESS'], 'BOX_TYPE': r['BOX_TYPE']}})" ] if fetch_boxes else []),
+                "        features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}, 'properties': {'BOX_NBR': r['BOX_NBR'], 'BOX_ADDRESS': r['BOX_ADDRESS'], 'BOX_TYPE': r['BOX_TYPE'], '_layer': 'boxes'}})" ] if fetch_boxes else []),
             *( [f"rows = spark.sql({json.dumps(facilities_sql)}).collect()",
                 "for r in rows:",
                 "    lat, lon = float(r['LATITUDE']), float(r['LONGITUDE'])",
                 "    if -90 <= lat <= 90 and -180 <= lon <= 180:",
-                "        features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}, 'properties': {'LOCALE_NAME': r['LOCALE_NAME'], 'FACILITY_TYPE': r['FACILITY_TYPE'], 'ADDRESS': r['ADDRESS']}})" ] if fetch_facilities else []),
+                "        features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}, 'properties': {'LOCALE_NAME': r['LOCALE_NAME'], 'FACILITY_TYPE': r['FACILITY_TYPE'], 'ADDRESS': r['ADDRESS'], '_layer': 'facilities'}})" ] if fetch_facilities else []),
             "print(json.dumps({'type': 'FeatureCollection', 'features': features}))",
         )
         data, error = self._run_cluster_code(code)

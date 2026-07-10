@@ -110,7 +110,7 @@ function pushHistory(role, content){
 }
 
 const CONUS_BOUNDS = [[24.4, -125.0], [49.4, -66.9]];
-const map = L.map('map', { maxZoom: 13 }).fitBounds(CONUS_BOUNDS);
+const map = L.map('map', { maxZoom: 18 }).fitBounds(CONUS_BOUNDS);
 
 const BASEMAP_LAYERS = {
   osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -528,21 +528,30 @@ function showMap(geojson){
     }).addTo(map);
 
   } else if(weatherAlerts){
-    // ── NWS weather alerts: official NOAA symbology via ArcGIS MapServer ──
-    noaaLayer = L.esri.dynamicMapLayer({
-      url: 'https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA/watch_warn_adv/MapServer',
-      opacity: 0.65,
-      attribution: 'NWS/NOAA'
+    // ── NWS weather alerts: render alert polygons from GeoJSON using severity color ──
+    haloLayer = L.geoJSON(geojson, {
+      filter: f => !isPoint(f),
+      style: f => {
+        const c = (f.properties && f.properties._color) || '#fbbf24';
+        return { color:'#ffffff', weight:6, opacity:0.5, fill:false, interactive:false };
+      }
     }).addTo(map);
-    // Still render any polygons from our GeoJSON (e.g. for containment overlay)
-    const hasGeoJsonPolys = (geojson.features||[]).some(f => !isPoint(f) && f.geometry);
-    if(hasGeoJsonPolys){
-      polyLayer = L.geoJSON(geojson, {
-        filter: f => !isPoint(f),
-        style: ()=>({ color:'transparent', weight:0, fill:false, interactive:true }),
-        onEachFeature: bindPopup
+    polyLayer = L.geoJSON(geojson, {
+      filter: f => !isPoint(f),
+      style: f => {
+        const c = (f.properties && f.properties._color) || '#fbbf24';
+        return { color:c, weight:2.5, opacity:1, fill:true, fillColor:c, fillOpacity:0.25 };
+      },
+      onEachFeature: bindPopup
+    }).addTo(map);
+    // NOAA official symbology layer as supplemental overlay (loads if network allows)
+    try {
+      noaaLayer = L.esri.dynamicMapLayer({
+        url: 'https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA/watch_warn_adv/MapServer',
+        opacity: 0.5,
+        attribution: 'NWS/NOAA'
       }).addTo(map);
-    }
+    } catch(e){}
   } else {
     // ── Default: white halo + red / heat polygon ─────────────────────────
     haloLayer = L.geoJSON(geojson, {
