@@ -354,11 +354,11 @@ function buildHeatLegend(features){
     `<div style="font-weight:600;margin-bottom:4px">Box Count Density</div>` +
     `<div class="legend-row">` +
       `<div style="width:14px;height:14px;border-radius:2px;background:rgba(255,26,26,0.60);border:1px solid #999"></div>` +
-      `<span>#1 ZIP ${top.ZIP} — ${top.count} boxes</span>` +
+      `<span>#1 ZIP ${top.zip_code} — ${top.count} boxes</span>` +
     `</div>` +
     `<div class="legend-row">` +
       `<div style="width:14px;height:14px;border-radius:2px;background:rgba(255,26,26,0.15);border:1px solid #999"></div>` +
-      `<span>#${bot.rank} ZIP ${bot.ZIP} — ${bot.count} boxes</span>` +
+      `<span>#${bot.rank} ZIP ${bot.zip_code} — ${bot.count} boxes</span>` +
     `</div>`;
   el.style.display = 'block';
 }
@@ -516,15 +516,17 @@ function showMap(geojson){
     }).addTo(map);
 
   } else if(boundaryType){
-    // ── Named boundary: type-specific color + light fill ─────────────────
+    // ── Named boundary: ZIP/ZIP3 = no fill, thick outline; others = light fill
     const clr = BCLR[boundaryType] || '#60a5fa';
+    const isZipBdy = boundaryType === 'zip' || boundaryType === 'zip3';
     haloLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
-      style: ()=>({ color:'#ffffff', weight:6, opacity:0.55, fill:false, interactive:false })
+      style: ()=>({ color:'#ffffff', weight:isZipBdy ? 9 : 6, opacity:0.55, fill:false, interactive:false })
     }).addTo(map);
     polyLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
-      style: ()=>({ color:clr, weight:2.5, opacity:1, fill:true, fillColor:clr, fillOpacity:0.08 }),
+      style: ()=>({ color:clr, weight:isZipBdy ? 3.5 : 2.5, opacity:1,
+                    fill:!isZipBdy, fillColor:clr, fillOpacity:isZipBdy ? 0 : 0.08 }),
       onEachFeature: bindPopup
     }).addTo(map);
 
@@ -564,8 +566,13 @@ function showMap(geojson){
       style: f => {
         if(heatFill){
           const op = (f.properties && f.properties.fill_opacity != null)
-            ? f.properties.fill_opacity : 0.15;
-          return { color:'#cc0000', weight:2, opacity:0.9, fill:true, fillColor:'#ff1a1a', fillOpacity:op };
+            ? f.properties.fill_opacity : 0.40;
+          const t = Math.max(0, Math.min(1, (op - 0.12) / 0.60));
+          const cr = Math.round(252 + t * (220 - 252));
+          const cg = Math.round(165 + t * (38  - 165));
+          const cb = Math.round(165 + t * (38  - 165));
+          return { color:'#991b1b', weight:2, opacity:0.9, fill:true,
+                   fillColor:`rgb(${cr},${cg},${cb})`, fillOpacity:0.85 };
         }
         return { color:'#ff1a1a', weight:4, opacity:1, fill:false };
       },
@@ -625,13 +632,24 @@ function showMap(geojson){
   else if(weatherAlerts)  buildWeatherLegend(geojson.features || []);
   else                    document.getElementById('legend').style.display='none';
 
+  // ── Fit map to extent of all displayed geography ──────────────────────
   let bounds = null;
+  let polyBounds = null;
   try { if(pointLayer.getLayers().length) bounds = pointLayer.getBounds(); } catch(e){}
   try {
     const pb = polyLayer.getBounds();
-    if(pb.isValid()) bounds = bounds ? bounds.extend(pb) : pb;
+    if(pb.isValid()){ polyBounds = pb; bounds = bounds ? bounds.extend(pb) : pb; }
   } catch(e){}
-  if(bounds && bounds.isValid()) map.fitBounds(bounds, {padding:[30,30], maxZoom:13});
+  if(bounds && bounds.isValid()){
+    const nPts = pointLayer.getLayers().length;
+    if(nPts === 1 && !polyBounds){
+      // Single point, no polygon — zoom in close
+      map.setView(bounds.getCenter(), 15);
+    } else {
+      // Fit to the full extent; maxZoom:17 allows tight zoom on small geographies
+      map.fitBounds(bounds, {padding:[30,30], maxZoom:17});
+    }
+  }
 
   const n = geojson.features ? geojson.features.length : 0;
   document.getElementById('feat-count').textContent = n+' feature(s)';
