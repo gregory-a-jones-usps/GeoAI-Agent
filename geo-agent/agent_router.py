@@ -23,18 +23,8 @@ _TBL_FACILITIES = os.environ.get("TBL_FACILITIES", "edlprod.geo_analytics.facili
 _TBL_BOXES = os.environ.get("TBL_BOXES", "edlprod.geo_analytics.cpms_co_t")
 
 # Single Genie space — CPMS collection boxes only
-_CPMS_GENIE_SPACE = (
-    os.environ.get("GENIE_SPACE_CPMS")
-    or os.environ.get("GENIE_SPACE_ID")
-    or "01f164dda12514ad8940be29a049870c"
-)
-_FACILITIES_GENIE_SPACE = (
-    os.environ.get("GENIE_SPACE_FACILITIES")
-    or "01f16b0f00271be69d67170685241974"
-)
-
-# LLM endpoint for intent classification
-_LLM_CLASSIFY_ENDPOINT = os.environ.get("LLM_ENDPOINT", "databricks-meta-llama-3-3-70b-instruct")
+_CPMS_GENIE_SPACE = os.environ["GENIE_SPACE_ID"]
+_FACILITIES_GENIE_SPACE = os.environ["GENIE_SPACE_FACILITIES"]
 
 _SA_COLORS = {
     "5": "#22c55e",
@@ -77,7 +67,7 @@ _SHOW_QUERY_RE  = re.compile(r'\b(?:show|list|find|plot|map|display|where|which|
 
 # Regex for deterministic weather_alerts / weather_containment pre-checks
 _WEATHER_RE = re.compile(
-    r'\bweather\b'
+    r'\bw[ea]+ther\b'
     r'|\bactive\s+(?:nws\s+|noaa\s+)?alerts?\b'
     r'|\b(?:nws|noaa)\s+alerts?\b'
     r'|\bstorms?\s+(?:warnings?|watches?)\b'
@@ -616,10 +606,10 @@ class RealAgent:
     def __init__(self):
         from databricks.sdk import WorkspaceClient
 
-        _host = os.environ.get("DATABRICKS_HOST", "https://adb-6884316730967297.17.azuredatabricks.net")
+        _host = os.environ["DATABRICKS_HOST"]
         _token = os.environ.get("GIS_USER_PAT")
         self.w = WorkspaceClient(host=_host, token=_token)
-        self.cluster_id = os.environ.get("GIS_CLUSTER_ID", "0318-174606-fs95elli")
+        self.cluster_id = os.environ["GIS_CLUSTER_ID"]
         self._context_id = None
         self._warm = False
         threading.Thread(target=self._warmup, daemon=True).start()
@@ -1266,12 +1256,16 @@ class RealAgent:
         _n_m = re.search(r'\b(?:nearest|closest)\s+(\d+)\b|\b(\d+)\s+(?:nearest|closest)\b', question, re.I)
         top_n = int(_n_m.group(1) or _n_m.group(2)) if _n_m else 1
         top_n = max(1, min(top_n, 20))
+        zip_ref = ref_loc.strip() if (len(ref_loc.strip()) == 5 and ref_loc.strip().isdigit()) else None
+        bdy_sql = ("SELECT GEOMETRY FROM " + _TBL_ZIP5 + " WHERE ZIP = '" + zip_ref + "' LIMIT 1") if zip_ref else None
+        zip3_bdy_sql = (f"SELECT geometry_geojson FROM edlprod.geo_analytics.gis1_zip3 WHERE ZIP3 = '{zip_ref[:3]}' LIMIT 1") if zip_ref else None
         code = _build_code(
             _SPARK_SETUP,
             _GA_SETUP,
             "import json",
             "from math import radians, cos, sin, asin, sqrt",
             "from geoanalytics.tools import Geocode",
+            _NORM_RINGS_FN,
             f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
             f"query_sql = {json.dumps(sql)}",
             f"ref_df = spark.createDataFrame([({json.dumps(ref_loc)},)], ['address'])",
@@ -1299,7 +1293,29 @@ class RealAgent:
             "        props['distance_mi'] = d",
             f"        props['_layer'] = '{layer}'",
             "        features.append({'type':'Feature','geometry':{'type':'Point','coordinates':[round(float(r['LONGITUDE']),6),round(float(r['LATITUDE']),6)]},'properties':props})",
-            "    print(json.dumps({'type':'FeatureCollection','features':features,'count':len(features),'nearest_label':ranked[0]['label'] if ranked else ''}))",
+            *(
+                [
+                    "    _bdy_type = None",
+                    "    try:",
+                    f"        _bdy_r = spark.sql({json.dumps(bdy_sql)}).collect()",
+                    "        if _bdy_r and _bdy_r[0][0]:",
+                    "            _bdy_geom = _convert_geom_display(json.loads(_bdy_r[0][0]), total_pts=200)",
+                    "            if _bdy_geom.get('coordinates'):",
+                    f"                features.append({{'type':'Feature','geometry':_bdy_geom,'properties':{{'ZIP':{json.dumps(zip_ref)}}}}})",
+                    "                _bdy_type = 'zip'",
+                    "        if not _bdy_type:",
+                    f"            _z3r = spark.sql({json.dumps(zip3_bdy_sql)}).collect()",
+                    "            if _z3r and _z3r[0][0]:",
+                    "                _z3g = json.loads(_z3r[0][0])",
+                    f"                features.append({{'type':'Feature','geometry':_z3g,'properties':{{'ZIP3':{json.dumps(zip_ref[:3])}}}}})",
+                    "                _bdy_type = 'zip3'",
+                    "    except Exception:",
+                    "        pass",
+                    "    print(json.dumps({'type':'FeatureCollection','features':features,'properties':{'boundary_type':_bdy_type},'count':len(features),'nearest_label':ranked[0]['label'] if ranked else ''}))",
+                ] if zip_ref else [
+                    "    print(json.dumps({'type':'FeatureCollection','features':features,'count':len(features),'nearest_label':ranked[0]['label'] if ranked else ''}))",
+                ]
+            ),
             "except SystemExit:",
             "    pass",
             "except Exception as e:",
@@ -1313,14 +1329,15 @@ class RealAgent:
             if isinstance(parsed, dict) and "error" in parsed:
                 return GeoResponse(answer=f"Nearest search error: {parsed['error']}", map_data=None, sources=["geoanalytics-engine"])
             features = parsed.get("features", [])
-            if not features:
+            pt_features = [f for f in features if f.get("geometry", {}).get("type") == "Point"]
+            if not pt_features:
                 return GeoResponse(answer=f"No {kind} found near {ref_loc}.", map_data=None, sources=["geoanalytics-engine"])
-            if len(features) == 1:
-                p = features[0]["properties"]
+            if len(pt_features) == 1:
+                p = pt_features[0]["properties"]
                 answer = f"Nearest {kind} to {ref_loc}: {p.get('label')} ({p.get('distance_mi')} mi)"
             else:
-                lines_out = [f"{i+1}. {f['properties'].get('label')} ({f['properties'].get('distance_mi')} mi)" for i, f in enumerate(features)]
-                answer = f"Nearest {len(features)} {kind}s to {ref_loc}:\n" + "\n".join(lines_out)
+                lines_out = [f"{i+1}. {f['properties'].get('label')} ({f['properties'].get('distance_mi')} mi)" for i, f in enumerate(pt_features)]
+                answer = f"Nearest {len(pt_features)} {kind}s to {ref_loc}:\n" + "\n".join(lines_out)
             return GeoResponse(answer=answer, map_data=parsed, sources=["geoanalytics-engine"])
         except Exception:
             return GeoResponse(answer=f"Nearest raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
@@ -1547,7 +1564,12 @@ class RealAgent:
                     state = abbr
                     break
         if not state:
-            state = next((w.upper() for w in re.findall(r"\b[A-Za-z]{2}\b", q) if w.upper() in _STATE_ABBRS), None)
+            _AMBIG_STATES = frozenset(["IN", "OR", "ME", "OH", "OK", "HI", "ID"])
+            state = next(
+                (w.upper() for w in re.findall(r"\b[A-Za-z]{2}\b", q)
+                 if w.upper() in _STATE_ABBRS and w.upper() not in _AMBIG_STATES),
+                None,
+            )
 
         if city:
             city = re.sub(r"\b(top|zip|zips|by|count|collection|box|boxes|facility|facilities)\b", "", city, flags=re.I)
@@ -1667,6 +1689,19 @@ class RealAgent:
             props["_severity"] = sev
             if f.get("geometry") is not None:
                 geo_features.append(f)
+            else:
+                # NWS zone-based alerts omit inline geometry — fetch first affected zone boundary
+                for zone_url in (props.get("affectedZones") or [])[:5]:
+                    try:
+                        zreq = urllib.request.Request(zone_url, headers={"User-Agent": "geo-agent/1.0 (USPS GIS Application; robert.e.brimhall@usps.gov)", "Accept": "application/geo+json"})
+                        with urllib.request.urlopen(zreq, timeout=8) as zresp:
+                            zgeom = json.loads(zresp.read()).get("geometry")
+                        if zgeom:
+                            f_z = dict(f); f_z["geometry"] = zgeom
+                            geo_features.append(f_z)
+                            break
+                    except Exception:
+                        continue
 
         summary_lines = [f"{count} active NWS alert{'s' if count != 1 else ''}{scope}:"]
         for evt, cnt in sorted(event_counts.items(), key=lambda x: -x[1]):

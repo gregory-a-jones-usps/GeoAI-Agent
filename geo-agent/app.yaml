@@ -16,3 +16,9 @@ env:
     valueFrom: user_pat
   - name: LLM_ENDPOINT
     value: "mas-33c3b825-endpoint"
+  - name: TBL_ZIP5
+    value: "edlprod.geo_analytics.usps_zip5"
+  - name: TBL_FACILITIES
+    value: "edlprod.geo_analytics.facilities_fc"
+  - name: TBL_BOXES
+    value: "edlprod.geo_analytics.cpms_co_t"
