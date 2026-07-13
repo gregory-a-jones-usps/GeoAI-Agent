@@ -300,6 +300,59 @@ def _convert_geom_display(raw_rings, total_pts=60, precision=4, max_parts=4):
 """
 
 
+
+def _convert_webmercator_to_geojson(raw_json_str: str, total_pts: int = 200, precision: int = 5) -> Optional[Dict[str, Any]]:
+    """Convert usps_zip5 GEOMETRY (web mercator rings JSON) to WGS-84 GeoJSON.
+    Runs on the app server — no cluster needed."""
+    import math as _m
+    try:
+        raw_rings = json.loads(raw_json_str)
+        if not raw_rings:
+            return None
+
+        def _cvt_ring(ring, n_pts, prec):
+            step = max(1, len(ring) // max(1, n_pts))
+            out = []
+            for pt in ring[::step]:
+                x, y = pt[0], pt[1]
+                lon = (x / 20037508.34) * 180
+                lat = (y / 20037508.34) * 180
+                lat = 180 / _m.pi * (2 * _m.atan(_m.exp(lat * _m.pi / 180)) - _m.pi / 2)
+                out.append([round(lon, prec), round(lat, prec)])
+            if out and out[0] != out[-1]:
+                out.append(out[0])
+            return out
+
+        # Detect multi vs simple
+        try:
+            is_multi = not isinstance(raw_rings[0][0][0], (int, float))
+        except (IndexError, TypeError):
+            is_multi = False
+
+        max_parts = 4
+        if is_multi:
+            parts = sorted(raw_rings, key=lambda p: sum(len(r) for r in p), reverse=True)[:max_parts]
+            total_raw = max(1, sum(len(r) for poly in parts for r in poly))
+            coords = []
+            for poly_rings in parts:
+                poly_out = []
+                for ring in poly_rings:
+                    n = max(4, round(len(ring) / total_raw * total_pts))
+                    poly_out.append(_cvt_ring(ring, n, precision))
+                coords.append(poly_out)
+            return {"type": "MultiPolygon", "coordinates": coords}
+
+        rings = sorted(raw_rings, key=len, reverse=True)[:max_parts]
+        total_raw = max(1, sum(len(r) for r in rings))
+        coords = []
+        for ring in rings:
+            n = max(4, round(len(ring) / total_raw * total_pts))
+            coords.append(_cvt_ring(ring, n, precision))
+        return {"type": "Polygon", "coordinates": coords}
+    except Exception:
+        return None
+
+
 class GeoResponse(BaseModel):
     answer: str
     map_data: Optional[Dict[str, Any]] = None
@@ -1260,8 +1313,6 @@ class RealAgent:
         top_n = int(_n_m.group(1) or _n_m.group(2)) if _n_m else 1
         top_n = max(1, min(top_n, 20))
         zip_ref = ref_loc.strip() if (len(ref_loc.strip()) == 5 and ref_loc.strip().isdigit()) else None
-        bdy_sql = ("SELECT GEOMETRY FROM " + _TBL_ZIP5 + " WHERE ZIP = '" + zip_ref + "' LIMIT 1") if zip_ref else None
-        zip3_bdy_sql = (f"SELECT geometry_geojson FROM edlprod.geo_analytics.gis1_zip3 WHERE ZIP3 = '{zip_ref[:3]}' LIMIT 1") if zip_ref else None
         code = _build_code(
             _SPARK_SETUP,
             _GA_SETUP,
@@ -1296,29 +1347,7 @@ class RealAgent:
             "        props['distance_mi'] = d",
             f"        props['_layer'] = '{layer}'",
             "        features.append({'type':'Feature','geometry':{'type':'Point','coordinates':[round(float(r['LONGITUDE']),6),round(float(r['LATITUDE']),6)]},'properties':props})",
-            *(
-                [
-                    "    _bdy_type = None",
-                    "    try:",
-                    f"        _bdy_r = spark.sql({json.dumps(bdy_sql)}).collect()",
-                    "        if _bdy_r and _bdy_r[0][0]:",
-                    "            _bdy_geom = _convert_geom_display(json.loads(_bdy_r[0][0]), total_pts=200)",
-                    "            if _bdy_geom.get('coordinates'):",
-                    f"                features.append({{'type':'Feature','geometry':_bdy_geom,'properties':{{'ZIP':{json.dumps(zip_ref)}}}}})",
-                    "                _bdy_type = 'zip'",
-                    "        if not _bdy_type:",
-                    f"            _z3r = spark.sql({json.dumps(zip3_bdy_sql)}).collect()",
-                    "            if _z3r and _z3r[0][0]:",
-                    "                _z3g = json.loads(_z3r[0][0])",
-                    f"                features.append({{'type':'Feature','geometry':_z3g,'properties':{{'ZIP3':{json.dumps(zip_ref[:3])}}}}})",
-                    "                _bdy_type = 'zip3'",
-                    "    except Exception:",
-                    "        pass",
-                    "    print(json.dumps({'type':'FeatureCollection','features':features,'properties':{'boundary_type':_bdy_type},'count':len(features),'nearest_label':ranked[0]['label'] if ranked else ''}))",
-                ] if zip_ref else [
-                    "    print(json.dumps({'type':'FeatureCollection','features':features,'count':len(features),'nearest_label':ranked[0]['label'] if ranked else ''}))",
-                ]
-            ),
+            "    print(json.dumps({'type':'FeatureCollection','features':features,'count':len(features),'nearest_label':ranked[0]['label'] if ranked else ''}))",
             "except SystemExit:",
             "    pass",
             "except Exception as e:",
@@ -1341,6 +1370,26 @@ class RealAgent:
             else:
                 lines_out = [f"{i+1}. {f['properties'].get('label')} ({f['properties'].get('distance_mi')} mi)" for i, f in enumerate(pt_features)]
                 answer = f"Nearest {len(pt_features)} {kind}s to {ref_loc}:\n" + "\n".join(lines_out)
+            # ── Fetch ZIP boundary separately (app-side conversion) ────────────
+            if zip_ref:
+                try:
+                    bdy_code = _build_code(
+                        _SPARK_SETUP,
+                        "import json",
+                        f"rows = spark.sql(\"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP = \'{zip_ref}\' LIMIT 1\").collect()",
+                        "print(rows[0][0] if rows and rows[0][0] else '')",
+                    )
+                    bdy_raw, bdy_err = self._run_cluster_code(bdy_code)
+                    if not bdy_err and bdy_raw and bdy_raw.strip():
+                        bdy_geom = _convert_webmercator_to_geojson(bdy_raw.strip())
+                        if bdy_geom and bdy_geom.get("coordinates"):
+                            parsed.setdefault("features", []).append(
+                                {"type": "Feature", "geometry": bdy_geom, "properties": {"ZIP": zip_ref}}
+                            )
+                            parsed.setdefault("properties", {})["boundary_type"] = "zip"
+                except Exception:
+                    pass  # boundary failure never blocks facility results
+
             return GeoResponse(answer=answer, map_data=parsed, sources=["geoanalytics-engine"])
         except Exception:
             return GeoResponse(answer=f"Nearest raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
