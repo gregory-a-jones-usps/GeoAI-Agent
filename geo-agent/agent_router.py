@@ -26,6 +26,9 @@ _TBL_BOXES = os.environ.get("TBL_BOXES", "edlprod.geo_analytics.cpms_co_t")
 _CPMS_GENIE_SPACE = os.environ["GENIE_SPACE_ID"]
 _FACILITIES_GENIE_SPACE = os.environ["GENIE_SPACE_FACILITIES"]
 
+# LLM endpoint for intent classification
+_LLM_CLASSIFY_ENDPOINT = os.environ["LLM_ENDPOINT"]
+
 _SA_COLORS = {
     "5": "#22c55e",
     "10": "#f97316",
@@ -1973,7 +1976,7 @@ class GISAgent:
             if _SA_GEN_RE.search(question):
                 _sa_data = _classify_intent_llm(
                     question, ra.w, history_list,
-                    llm_endpoint=os.environ.get("LLM_ENDPOINT", _LLM_CLASSIFY_ENDPOINT),
+                    llm_endpoint=_LLM_CLASSIFY_ENDPOINT,
                 )
                 # ── Regex fallback for breaks ─────────────────────────────────────
                 if not _sa_data.get("breaks"):
@@ -2033,7 +2036,7 @@ class GISAgent:
 
             intent_data = _classify_intent_llm(
                 question, ra.w, history_list,
-                llm_endpoint=os.environ.get("LLM_ENDPOINT", _LLM_CLASSIFY_ENDPOINT),
+                llm_endpoint=_LLM_CLASSIFY_ENDPOINT,
             )
             intent = intent_data.get("intent", "genie")
             handler = _INTENT_HANDLERS.get(intent)
