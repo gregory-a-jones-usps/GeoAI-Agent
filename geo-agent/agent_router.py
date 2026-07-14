@@ -1626,7 +1626,7 @@ class RealAgent:
             f"    bdy = spark.sql(f\"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE CAST(ZIP AS STRING) = '{{zip_code}}' LIMIT 1\").collect()",
             "    if bdy and bdy[0][0]:",
             "        geom = _convert_geom_display(json.loads(bdy[0][0]))",
-            "        fill_op = round(0.12 + 0.60 * (len(top_rows) - rank) / max(1, len(top_rows) - 1), 2),"
+            "        fill_op = round(0.12 + 0.60 * (len(top_rows) - rank) / max(1, len(top_rows) - 1), 2)",
             "        features.append({'type': 'Feature', 'geometry': geom, 'properties': {'zip_code': zip_code, 'count': cnt, 'rank': rank, 'fill_opacity': fill_op}})",
             "    rank += 1",
             "print(json.dumps({'type': 'FeatureCollection', 'features': features, 'properties': {'heat_fill': True}, 'results': results}))",
