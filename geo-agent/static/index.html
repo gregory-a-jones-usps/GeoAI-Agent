@@ -417,6 +417,7 @@ function buildBoundaryLegend(boundaryType, features){
   const lbl = BLBL[boundaryType] || boundaryType;
   const names = [...new Set(
     (features||[])
+      .filter(f => !isPoint(f))
       .map(f => f.properties && Object.values(f.properties)[0])
       .filter(Boolean)
       .map(v => boundaryType === 'zip' ? normalizeZipLegendLabel(v) : v)
