@@ -75,9 +75,17 @@ _ZIP_PRESENT_RE = re.compile(r'\b\d{5}\b')
 _COUNT_QUERY_RE = re.compile(r'\bhow\s+many\b|\bcount\b|\btotal\b', re.I)
 _SHOW_QUERY_RE  = re.compile(r'\b(?:show|list|find|plot|map|display|where|which|what)\b', re.I)
 
+
+def _is_zip_ranking(question: str) -> bool:
+    q = (question or "").lower()
+    has_zip = bool(re.search(r"\bzips?\b", q))
+    has_rank = bool(re.search(r"\btop\s+\d+\b|\btop\b|\brank(?:ing)?\b|\bhighest\b|\bmost\b", q))
+    has_subject = any(w in q for w in ["box", "boxes", "collection", "cpms", "facility", "facilities", "office", "plant"])
+    return has_zip and has_rank and has_subject
+
 # Regex for deterministic weather_alerts / weather_containment pre-checks
 _WEATHER_RE = re.compile(
-    r'\bweather\b'
+    r'\bw[ea]+ther\b'
     r'|\bactive\s+(?:nws\s+|noaa\s+)?alerts?\b'
     r'|\b(?:nws|noaa)\s+alerts?\b'
     r'|\bstorms?\s+(?:warnings?|watches?)\b'
@@ -1266,12 +1274,15 @@ class RealAgent:
         _n_m = re.search(r'\b(?:nearest|closest)\s+(\d+)\b|\b(\d+)\s+(?:nearest|closest)\b', question, re.I)
         top_n = int(_n_m.group(1) or _n_m.group(2)) if _n_m else 1
         top_n = max(1, min(top_n, 20))
+        zip_ref = ref_loc.strip() if (len(ref_loc.strip()) == 5 and ref_loc.strip().isdigit()) else None
+        bdy_sql = ("SELECT GEOMETRY FROM " + _TBL_ZIP5 + " WHERE ZIP = '" + zip_ref + "' LIMIT 1") if zip_ref else None
         code = _build_code(
             _SPARK_SETUP,
             _GA_SETUP,
             "import json",
             "from math import radians, cos, sin, asin, sqrt",
             "from geoanalytics.tools import Geocode",
+            _NORM_RINGS_FN,
             f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
             f"query_sql = {json.dumps(sql)}",
             f"ref_df = spark.createDataFrame([({json.dumps(ref_loc)},)], ['address'])",
@@ -1299,7 +1310,25 @@ class RealAgent:
             "        props['distance_mi'] = d",
             f"        props['_layer'] = '{layer}'",
             "        features.append({'type':'Feature','geometry':{'type':'Point','coordinates':[round(float(r['LONGITUDE']),6),round(float(r['LATITUDE']),6)]},'properties':props})",
-            "    print(json.dumps({'type':'FeatureCollection','features':features,'count':len(features),'nearest_label':ranked[0]['label'] if ranked else ''}))",
+            *(
+                [
+                    f"    bdy_rows = spark.sql({json.dumps(bdy_sql)}).collect()",
+                    "    _bdy_type = None",
+                    "    if bdy_rows and bdy_rows[0][0]:",
+                    "        bdy_geom = _convert_geom_display(json.loads(bdy_rows[0][0]))",
+                    f"        features.append({{'type':'Feature','geometry':bdy_geom,'properties':{{'ZIP':{json.dumps(zip_ref)}}}}})",
+                    "        _bdy_type = 'zip'",
+                    "    else:",
+                    f"        _z3r = spark.sql(\"SELECT geometry_geojson FROM edlprod.geo_analytics.gis1_zip3 WHERE ZIP3 = '{zip_ref[:3]}' LIMIT 1\").collect()",
+                    "        if _z3r and _z3r[0][0]:",
+                    "            _z3g = json.loads(_z3r[0][0])",
+                    f"            features.append({{'type':'Feature','geometry':_z3g,'properties':{{'ZIP3':{json.dumps(zip_ref[:3])}}}}})",
+                    "            _bdy_type = 'zip3'",
+                    "    print(json.dumps({'type':'FeatureCollection','features':features,'properties':{'boundary_type':_bdy_type},'count':len(features),'nearest_label':ranked[0]['label'] if ranked else ''}))",
+                ] if zip_ref else [
+                    "    print(json.dumps({'type':'FeatureCollection','features':features,'count':len(features),'nearest_label':ranked[0]['label'] if ranked else ''}))",
+                ]
+            ),
             "except SystemExit:",
             "    pass",
             "except Exception as e:",
@@ -1313,14 +1342,15 @@ class RealAgent:
             if isinstance(parsed, dict) and "error" in parsed:
                 return GeoResponse(answer=f"Nearest search error: {parsed['error']}", map_data=None, sources=["geoanalytics-engine"])
             features = parsed.get("features", [])
-            if not features:
+            pt_features = [f for f in features if f.get("geometry", {}).get("type") == "Point"]
+            if not pt_features:
                 return GeoResponse(answer=f"No {kind} found near {ref_loc}.", map_data=None, sources=["geoanalytics-engine"])
-            if len(features) == 1:
-                p = features[0]["properties"]
+            if len(pt_features) == 1:
+                p = pt_features[0]["properties"]
                 answer = f"Nearest {kind} to {ref_loc}: {p.get('label')} ({p.get('distance_mi')} mi)"
             else:
-                lines_out = [f"{i+1}. {f['properties'].get('label')} ({f['properties'].get('distance_mi')} mi)" for i, f in enumerate(features)]
-                answer = f"Nearest {len(features)} {kind}s to {ref_loc}:\n" + "\n".join(lines_out)
+                lines_out = [f"{i+1}. {f['properties'].get('label')} ({f['properties'].get('distance_mi')} mi)" for i, f in enumerate(pt_features)]
+                answer = f"Nearest {len(pt_features)} {kind}s to {ref_loc}:\n" + "\n".join(lines_out)
             return GeoResponse(answer=answer, map_data=parsed, sources=["geoanalytics-engine"])
         except Exception:
             return GeoResponse(answer=f"Nearest raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
@@ -1547,7 +1577,12 @@ class RealAgent:
                     state = abbr
                     break
         if not state:
-            state = next((w.upper() for w in re.findall(r"\b[A-Za-z]{2}\b", q) if w.upper() in _STATE_ABBRS), None)
+            _AMBIG_STATES = frozenset(["IN", "OR", "ME", "OH", "OK", "HI", "ID"])
+            state = next(
+                (w.upper() for w in re.findall(r"\b[A-Za-z]{2}\b", q)
+                 if w.upper() in _STATE_ABBRS and w.upper() not in _AMBIG_STATES),
+                None,
+            )
 
         if city:
             city = re.sub(r"\b(top|zip|zips|by|count|collection|box|boxes|facility|facilities)\b", "", city, flags=re.I)
@@ -1590,15 +1625,21 @@ class RealAgent:
             f"top_rows = spark.sql({json.dumps(sql)}).collect()",
             "results = []",
             "features = []",
+            "_zip_list = [str(r['zip_code']) for r in top_rows if r['zip_code'] is not None]",
+            "_zip_csv = ','.join(repr(z) for z in _zip_list)",
+            f"_bdy_rows = spark.sql('SELECT CAST(ZIP AS STRING) AS zip_code, GEOMETRY FROM {_TBL_ZIP5} WHERE CAST(ZIP AS STRING) IN (' + _zip_csv + ')').collect() if _zip_list else []",
+            "_bdy_map = {str(r['zip_code']): r['GEOMETRY'] for r in _bdy_rows if r['GEOMETRY']}",
             "rank = 1",
+            "max_cnt = max(int(r['cnt']) for r in top_rows) if top_rows else 1",
             "for r in top_rows:",
             "    zip_code = str(r['zip_code'])",
             "    cnt = int(r['cnt'])",
             "    results.append({'rank': rank, 'zip_code': zip_code, 'count': cnt})",
-            f"    bdy = spark.sql(f\"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP = '{{zip_code}}' LIMIT 1\").collect()",
-            "    if bdy and bdy[0][0]:",
-            "        geom = _convert_geom_display(json.loads(bdy[0][0]))",
-            "        features.append({'type': 'Feature', 'geometry': geom, 'properties': {'zip_code': zip_code, 'count': cnt, 'rank': rank}})",
+            "    _raw_geom = _bdy_map.get(zip_code)",
+            "    if _raw_geom:",
+            "        geom = _convert_geom_display(json.loads(_raw_geom))",
+            "        fill_op = round(0.12 + 0.60 * (len(top_rows) - rank) / max(1, len(top_rows) - 1), 2)",
+            "        features.append({'type': 'Feature', 'geometry': geom, 'properties': {'zip_code': zip_code, 'count': cnt, 'rank': rank, 'fill_opacity': fill_op}})",
             "    rank += 1",
             "print(json.dumps({'type': 'FeatureCollection', 'features': features, 'properties': {'heat_fill': True}, 'results': results}))",
         )
@@ -1667,6 +1708,19 @@ class RealAgent:
             props["_severity"] = sev
             if f.get("geometry") is not None:
                 geo_features.append(f)
+            else:
+                # NWS zone-based alerts omit inline geometry — fetch first affected zone boundary
+                for zone_url in (props.get("affectedZones") or [])[:5]:
+                    try:
+                        zreq = urllib.request.Request(zone_url, headers={"User-Agent": "geo-agent/1.0 (USPS GIS Application; robert.e.brimhall@usps.gov)", "Accept": "application/geo+json"})
+                        with urllib.request.urlopen(zreq, timeout=8) as zresp:
+                            zgeom = json.loads(zresp.read()).get("geometry")
+                        if zgeom:
+                            f_z = dict(f); f_z["geometry"] = zgeom
+                            geo_features.append(f_z)
+                            break
+                    except Exception:
+                        continue
 
         summary_lines = [f"{count} active NWS alert{'s' if count != 1 else ''}{scope}:"]
         for evt, cnt in sorted(event_counts.items(), key=lambda x: -x[1]):
@@ -1986,6 +2040,11 @@ class GISAgent:
             if _BOUNDARY_RE.search(question):
                 return _INTENT_HANDLERS["boundary"](ra, question, {}, history_list)
 
+            # ── Deterministic ZIP ranking pre-check ───────────────────────────────
+            # Catches prompts like "top 5 zips in Chicago by collection box count".
+            if _is_zip_ranking(question):
+                return _INTENT_HANDLERS["zip_ranking"](ra, question, {}, history_list)
+
             # ── Deterministic zip_count / spatial_lookup pre-checks ──────────────
             # Fires when a 5-digit ZIP is present and a layer keyword is present.
             _has_zip = bool(_ZIP_PRESENT_RE.search(question))
@@ -2006,7 +2065,43 @@ class GISAgent:
                 return handler(ra, question, intent_data, history_list)
             return ra._handle_genie(question)
 
-        return await loop.run_in_executor(None, _run)
+        result = await loop.run_in_executor(None, _run)
+
+        # ── ZIP boundary overlay ─────────────────────────────────────────────
+        # Whenever a 5-digit ZIP appears in the question, always fetch and pin
+        # its boundary on the map, regardless of which intent handled the query.
+        _zm = re.search(r'\b(\d{5})\b', question)
+        if _zm and result.map_data is not None:
+            _z = _zm.group(1)
+            _props = result.map_data.get("properties") or {}
+            if not _props.get("boundary_type") and not _props.get("weather_alerts") and not _props.get("sa_rings"):
+                def _do_zip_overlay():
+                    try:
+                        _bcode = _build_code(
+                            _SPARK_SETUP, "import json", _NORM_RINGS_FN,
+                            "try:",
+                            f"    _r = spark.sql(\"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP = '{_z}' LIMIT 1\").collect()",
+                            "    if _r and _r[0][0]:",
+                            "        print(json.dumps(_convert_geom_display(json.loads(_r[0][0]))))",
+                            "    else:",
+                            f"        _z3 = spark.sql(\"SELECT geometry_geojson FROM edlprod.geo_analytics.gis1_zip3 WHERE ZIP3 = '{_z[:3]}' LIMIT 1\").collect()",
+                            "        print(_z3[0][0] if _z3 and _z3[0][0] else 'null')",
+                            "except Exception:",
+                            "    print('null')",
+                        )
+                        _bd, _ = ra._run_cluster_code(_bcode)
+                        if _bd and _bd.strip() not in ("", "null"):
+                            _bg = json.loads(_bd.strip())
+                            if isinstance(_bg, dict) and _bg.get("type") in ("Polygon", "MultiPolygon"):
+                                result.map_data.setdefault("features", []).append(
+                                    {"type": "Feature", "geometry": _bg, "properties": {"ZIP": _z}}
+                                )
+                                result.map_data.setdefault("properties", {})["boundary_type"] = "zip"
+                    except Exception:
+                        pass
+                await loop.run_in_executor(None, _do_zip_overlay)
+
+        return result
 
 
 _router: Optional[GISAgent] = None

@@ -348,18 +348,19 @@ function buildHeatLegend(features){
     .filter(f => f.properties && f.properties.rank)
     .sort((a, b) => a.properties.rank - b.properties.rank);
   if(!sorted.length){ el.style.display='none'; return; }
-  const top = sorted[0].properties;
-  const bot = sorted[sorted.length - 1].properties;
-  el.innerHTML =
-    `<div style="font-weight:600;margin-bottom:4px">Box Count Density</div>` +
-    `<div class="legend-row">` +
-      `<div style="width:14px;height:14px;border-radius:2px;background:rgba(255,26,26,0.60);border:1px solid #999"></div>` +
-      `<span>#1 ZIP ${top.ZIP} — ${top.count} boxes</span>` +
-    `</div>` +
-    `<div class="legend-row">` +
-      `<div style="width:14px;height:14px;border-radius:2px;background:rgba(255,26,26,0.15);border:1px solid #999"></div>` +
-      `<span>#${bot.rank} ZIP ${bot.ZIP} — ${bot.count} boxes</span>` +
-    `</div>`;
+  el.innerHTML = `<div style="font-weight:600;margin-bottom:4px">Count by ZIP</div>` +
+    sorted.map(f => {
+      const p = f.properties;
+      const op = p.fill_opacity != null ? p.fill_opacity : 0.40;
+      const t  = Math.max(0, Math.min(1, (op - 0.12) / 0.60));
+      const cr = Math.round(252 + t * (220 - 252));
+      const cg = Math.round(165 + t * (38  - 165));
+      const cb = Math.round(165 + t * (38  - 165));
+      return `<div class="legend-row">` +
+        `<div style="width:14px;height:14px;border-radius:2px;background:rgb(${cr},${cg},${cb});border:1px solid #999"></div>` +
+        `<span>#${p.rank} ZIP ${p.zip_code} — ${p.count}</span>` +
+        `</div>`;
+    }).join('');
   el.style.display = 'block';
 }
 
@@ -388,9 +389,9 @@ function buildSaLegend(features){
 function buildBoundaryLegend(boundaryType, features){
   const el = document.getElementById('legend');
   const BCLR = {
-    zip:'#ef4444', state:'#3b82f6', county:'#f97316', district:'#22c55e',
+    zip:'#1d4ed8', state:'#3b82f6', county:'#f97316', district:'#22c55e',
     area:'#84cc16', log_division:'#a855f7', log_region:'#8b5cf6',
-    proc_division:'#06b6d4', proc_region:'#0ea5e9', zip3:'#eab308',
+    proc_division:'#06b6d4', proc_region:'#0ea5e9', zip3:'#1d4ed8',
     congressional:'#ec4899', retail_area:'#f43f5e'
   };
   const BLBL = {
@@ -473,30 +474,41 @@ function isPoint(f){
 }
 
 function showMap(geojson){
-  if(haloLayer)  map.removeLayer(haloLayer);
-  if(polyLayer)  map.removeLayer(polyLayer);
-  if(pointLayer) map.removeLayer(pointLayer);
-  if(routeStopLayer) map.removeLayer(routeStopLayer);
-  if(noaaLayer) map.removeLayer(noaaLayer);
-  routeStopLayer = L.layerGroup();
-  noaaLayer = null;
-
-  const props        = geojson.properties || {};
-  const colorByType  = !!props.color_by_type;
-  const heatFill     = !!props.heat_fill;
-  const saRings      = !!props.sa_rings;
+  const props         = geojson.properties || {};
+  const colorByType   = !!props.color_by_type;
+  const heatFill      = !!props.heat_fill;
+  const saRings       = !!props.sa_rings;
   const boundaryType  = props.boundary_type || null;
   const weatherAlerts = !!props.weather_alerts;
   const usedLabels    = new Set();
+  const features      = geojson.features || [];
+  // SA-ring polygons (break_minutes set) from containment responses don't count
+  // as "new" polygons — they are SA outlines we already have on the map.
+  const hasNewPolygons = features.some(
+    f => !isPoint(f) && !(f.properties && f.properties.break_minutes != null)
+  );
+  const preserveSaPolys = !saRings && !hasNewPolygons && !!polyLayer && !!haloLayer && !!polyLayer._saPersistent;
+
+  if(!preserveSaPolys){
+    if(haloLayer)  map.removeLayer(haloLayer);
+    if(polyLayer)  map.removeLayer(polyLayer);
+    if(noaaLayer) map.removeLayer(noaaLayer);
+    noaaLayer = null;
+  }
+  if(pointLayer) map.removeLayer(pointLayer);
+  if(routeStopLayer) map.removeLayer(routeStopLayer);
+  routeStopLayer = L.layerGroup();
+
 
   // ── Boundary colors per type ──────────────────────────────────────────────
   const BCLR = {
-    zip:'#ef4444', state:'#3b82f6', county:'#f97316', district:'#22c55e',
+    zip:'#1d4ed8', state:'#3b82f6', county:'#f97316', district:'#22c55e',
     area:'#84cc16', log_division:'#a855f7', log_region:'#8b5cf6',
-    proc_division:'#06b6d4', proc_region:'#0ea5e9', zip3:'#eab308',
+    proc_division:'#06b6d4', proc_region:'#0ea5e9', zip3:'#1d4ed8',
     congressional:'#ec4899', retail_area:'#f43f5e'
   };
 
+  if(!preserveSaPolys){
   if(saRings){
     // ── SA drive-time rings: per-feature colored halo + fill ─────────────
     haloLayer = L.geoJSON(geojson, {
@@ -506,6 +518,7 @@ function showMap(geojson){
         return { color:c, weight:12, opacity:0.22, fill:false, interactive:false };
       }
     }).addTo(map);
+    haloLayer._saPersistent = true;
     polyLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
       style: f => {
@@ -514,17 +527,20 @@ function showMap(geojson){
       },
       onEachFeature: bindPopup
     }).addTo(map);
+    polyLayer._saPersistent = true;
 
   } else if(boundaryType){
-    // ── Named boundary: type-specific color + light fill ─────────────────
+    // ── Named boundary: ZIP/ZIP3 = no fill, thick outline; others = light fill
     const clr = BCLR[boundaryType] || '#60a5fa';
+    const isZipBdy = boundaryType === 'zip' || boundaryType === 'zip3';
     haloLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
-      style: ()=>({ color:'#ffffff', weight:6, opacity:0.55, fill:false, interactive:false })
+      style: ()=>({ color:'#ffffff', weight:isZipBdy ? 11 : 6, opacity:0.55, fill:false, interactive:false })
     }).addTo(map);
     polyLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
-      style: ()=>({ color:clr, weight:2.5, opacity:1, fill:true, fillColor:clr, fillOpacity:0.08 }),
+      style: ()=>({ color:clr, weight:isZipBdy ? 5 : 2.5, opacity:1,
+                    fill:!isZipBdy, fillColor:clr, fillOpacity:isZipBdy ? 0 : 0.08 }),
       onEachFeature: bindPopup
     }).addTo(map);
 
@@ -564,14 +580,20 @@ function showMap(geojson){
       style: f => {
         if(heatFill){
           const op = (f.properties && f.properties.fill_opacity != null)
-            ? f.properties.fill_opacity : 0.15;
-          return { color:'#cc0000', weight:2, opacity:0.9, fill:true, fillColor:'#ff1a1a', fillOpacity:op };
+            ? f.properties.fill_opacity : 0.40;
+          const t = Math.max(0, Math.min(1, (op - 0.12) / 0.60));
+          const cr = Math.round(252 + t * (220 - 252));
+          const cg = Math.round(165 + t * (38  - 165));
+          const cb = Math.round(165 + t * (38  - 165));
+          return { color:'#991b1b', weight:2, opacity:0.9, fill:true,
+                   fillColor:`rgb(${cr},${cg},${cb})`, fillOpacity:0.85 };
         }
         return { color:'#ff1a1a', weight:4, opacity:1, fill:false };
       },
       onEachFeature: bindPopup
     }).addTo(map);
   }
+  } // end if(!preserveSaPolys)
 
   pointLayer = makeClusterGroup();
   L.geoJSON(geojson, {
@@ -618,20 +640,34 @@ function showMap(geojson){
   if(routeStopLayer.getLayers().length) routeStopLayer.addTo(map);
 
   // ── Legend dispatch ───────────────────────────────────────────────────────
-  if(saRings)           buildSaLegend(geojson.features || []);
-  else if(heatFill)     buildHeatLegend(geojson.features || []);
-  else if(colorByType)  buildLegend(usedLabels);
+  if(saRings)             buildSaLegend(geojson.features || []);
+  else if(heatFill)       buildHeatLegend(geojson.features || []);
+  else if(colorByType)    buildLegend(usedLabels);
   else if(boundaryType)   buildBoundaryLegend(boundaryType, geojson.features || []);
   else if(weatherAlerts)  buildWeatherLegend(geojson.features || []);
-  else                    document.getElementById('legend').style.display='none';
+  else if(!preserveSaPolys) document.getElementById('legend').style.display='none';
 
+  // ── Fit map to extent of all displayed geography ──────────────────────
   let bounds = null;
+  let polyBounds = null;
   try { if(pointLayer.getLayers().length) bounds = pointLayer.getBounds(); } catch(e){}
   try {
     const pb = polyLayer.getBounds();
-    if(pb.isValid()) bounds = bounds ? bounds.extend(pb) : pb;
+    if(pb.isValid()){
+      polyBounds = pb;
+      if(!preserveSaPolys || !bounds) bounds = bounds ? bounds.extend(pb) : pb;
+    }
   } catch(e){}
-  if(bounds && bounds.isValid()) map.fitBounds(bounds, {padding:[30,30], maxZoom:13});
+  if(bounds && bounds.isValid()){
+    const nPts = pointLayer.getLayers().length;
+    if(nPts === 1 && (!polyBounds || preserveSaPolys)){
+      // Single point, or point-only follow-up with preserved service area — zoom in close
+      map.setView(bounds.getCenter(), 15);
+    } else {
+      // Fit to the full extent; maxZoom:17 allows tight zoom on small geographies
+      map.fitBounds(bounds, {padding:[30,30], maxZoom:17});
+    }
+  }
 
   const n = geojson.features ? geojson.features.length : 0;
   document.getElementById('feat-count').textContent = n+' feature(s)';
