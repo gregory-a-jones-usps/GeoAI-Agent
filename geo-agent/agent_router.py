@@ -1795,6 +1795,8 @@ class RealAgent:
             "    contained_rows = []",
             "    seen_labels = set()",
             "    for i, geojson_str in enumerate(alert_geojsons):",
+            "        if len(contained_rows) >= 100:",
+            "            break",
             "        geom = json.loads(geojson_str)",
             "        if geom['type'] == 'Polygon':",
             "            coords = geom['coordinates']",
@@ -1809,10 +1811,12 @@ class RealAgent:
             "        matches = fac_df.filter(F.expr(f\"ST_Contains(ST_GeomFromWKT('{wkt}'), ST_Point(LONGITUDE, LATITUDE))\")).collect()",
             "        for r in matches:",
             "            lbl = r['label']",
-            "            if lbl not in seen_labels:",
+            "            if lbl not in seen_labels and len(contained_rows) < 100:",
             "                seen_labels.add(lbl)",
-            "                row_dict = {k: r[k] for k in r.asDict().keys() if k not in ('LATITUDE', 'LONGITUDE')}",
-            "                row_dict['_alert_event'] = alert_infos[i]['event']",
+            "                row_dict = {'label': r['label'], '_alert_event': alert_infos[i]['event'], '_alert_idx': i}",
+            "                if 'ftype' in r.asDict(): row_dict['ftype'] = r['ftype']",
+            "                if 'CITY' in r.asDict(): row_dict['CITY'] = r['CITY']",
+            "                if 'STATE' in r.asDict(): row_dict['STATE'] = r['STATE']",
             "                contained_rows.append({'props': row_dict, 'lat': float(r['LATITUDE']), 'lon': float(r['LONGITUDE'])})",
             "    features = []",
             "    for cr in contained_rows:",
@@ -1968,7 +1972,7 @@ class GISAgent:
             # ── Deterministic weather pre-checks ──────────────────────────────────
             # Catches "active weather alerts in TN", "tornado warnings in Texas", etc.
             if _WEATHER_RE.search(question):
-                if any(w in q_lower for w in ["box", "collection", "cpms", "facilit", "office", "plant"]):
+                if any(w in q_lower for w in ["box", "collection", "cpms", "facil", "office", "plant"]):
                     return _INTENT_HANDLERS["weather_containment"](ra, question, {}, history_list)
                 return _INTENT_HANDLERS["weather_alerts"](ra, question, {}, history_list)
 
