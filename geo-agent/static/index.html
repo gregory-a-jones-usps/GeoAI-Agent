@@ -350,9 +350,16 @@ function normalizeZipLegendLabel(value){
 function buildHeatLegend(features){
   const el = document.getElementById('legend');
   if(!features || !features.length){ el.style.display='none'; return; }
+  const seenZips = new Set();
   const sorted = [...features]
     .filter(f => f.properties && f.properties.rank)
-    .sort((a, b) => a.properties.rank - b.properties.rank);
+    .sort((a, b) => a.properties.rank - b.properties.rank)
+    .filter(f => {
+      const z = normalizeZipLegendLabel(f.properties.zip_code);
+      if(seenZips.has(z)) return false;
+      seenZips.add(z);
+      return true;
+    });
   if(!sorted.length){ el.style.display='none'; return; }
   el.innerHTML = `<div style="font-weight:600;margin-bottom:4px">Count by ZIP</div>` +
     sorted.map(f => {
@@ -408,11 +415,12 @@ function buildBoundaryLegend(boundaryType, features){
   };
   const clr = BCLR[boundaryType] || '#60a5fa';
   const lbl = BLBL[boundaryType] || boundaryType;
-  const names = (features||[])
-    .map(f => f.properties && Object.values(f.properties)[0])
-    .filter(Boolean)
-    .map(v => boundaryType === 'zip' ? normalizeZipLegendLabel(v) : v)
-    .slice(0,3).join(', ');
+  const names = [...new Set(
+    (features||[])
+      .map(f => f.properties && Object.values(f.properties)[0])
+      .filter(Boolean)
+      .map(v => boundaryType === 'zip' ? normalizeZipLegendLabel(v) : v)
+  )].slice(0,3).join(', ');
   el.innerHTML =
     `<div style="font-weight:600;margin-bottom:4px">${lbl}</div>` +
     `<div class="legend-row">` +
