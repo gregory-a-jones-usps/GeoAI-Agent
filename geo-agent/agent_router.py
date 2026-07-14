@@ -75,6 +75,14 @@ _ZIP_PRESENT_RE = re.compile(r'\b\d{5}\b')
 _COUNT_QUERY_RE = re.compile(r'\bhow\s+many\b|\bcount\b|\btotal\b', re.I)
 _SHOW_QUERY_RE  = re.compile(r'\b(?:show|list|find|plot|map|display|where|which|what)\b', re.I)
 
+
+def _is_zip_ranking(question: str) -> bool:
+    q = (question or "").lower()
+    has_zip = bool(re.search(r"\bzips?\b", q))
+    has_rank = bool(re.search(r"\btop\s+\d+\b|\btop\b|\brank(?:ing)?\b|\bhighest\b|\bmost\b", q))
+    has_subject = any(w in q for w in ["box", "boxes", "collection", "cpms", "facility", "facilities", "office", "plant"])
+    return has_zip and has_rank and has_subject
+
 # Regex for deterministic weather_alerts / weather_containment pre-checks
 _WEATHER_RE = re.compile(
     r'\bw[ea]+ther\b'
@@ -1617,15 +1625,19 @@ class RealAgent:
             f"top_rows = spark.sql({json.dumps(sql)}).collect()",
             "results = []",
             "features = []",
+            "_zip_list = [str(r['zip_code']) for r in top_rows if r['zip_code'] is not None]",
+            "_zip_csv = ','.join(repr(z) for z in _zip_list)",
+            f"_bdy_rows = spark.sql('SELECT CAST(ZIP AS STRING) AS zip_code, GEOMETRY FROM {_TBL_ZIP5} WHERE CAST(ZIP AS STRING) IN (' + _zip_csv + ')').collect() if _zip_list else []",
+            "_bdy_map = {str(r['zip_code']): r['GEOMETRY'] for r in _bdy_rows if r['GEOMETRY']}",
             "rank = 1",
             "max_cnt = max(int(r['cnt']) for r in top_rows) if top_rows else 1",
             "for r in top_rows:",
             "    zip_code = str(r['zip_code'])",
             "    cnt = int(r['cnt'])",
             "    results.append({'rank': rank, 'zip_code': zip_code, 'count': cnt})",
-            f"    bdy = spark.sql(f\"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE CAST(ZIP AS STRING) = '{{zip_code}}' LIMIT 1\").collect()",
-            "    if bdy and bdy[0][0]:",
-            "        geom = _convert_geom_display(json.loads(bdy[0][0]))",
+            "    _raw_geom = _bdy_map.get(zip_code)",
+            "    if _raw_geom:",
+            "        geom = _convert_geom_display(json.loads(_raw_geom))",
             "        fill_op = round(0.12 + 0.60 * (len(top_rows) - rank) / max(1, len(top_rows) - 1), 2)",
             "        features.append({'type': 'Feature', 'geometry': geom, 'properties': {'zip_code': zip_code, 'count': cnt, 'rank': rank, 'fill_opacity': fill_op}})",
             "    rank += 1",
@@ -2027,6 +2039,11 @@ class GISAgent:
             # "show the boundary of TN", "ZIP 38118 boundary", etc.
             if _BOUNDARY_RE.search(question):
                 return _INTENT_HANDLERS["boundary"](ra, question, {}, history_list)
+
+            # ── Deterministic ZIP ranking pre-check ───────────────────────────────
+            # Catches prompts like "top 5 zips in Chicago by collection box count".
+            if _is_zip_ranking(question):
+                return _INTENT_HANDLERS["zip_ranking"](ra, question, {}, history_list)
 
             # ── Deterministic zip_count / spatial_lookup pre-checks ──────────────
             # Fires when a 5-digit ZIP is present and a layer keyword is present.

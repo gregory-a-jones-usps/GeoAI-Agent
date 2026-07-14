@@ -348,18 +348,19 @@ function buildHeatLegend(features){
     .filter(f => f.properties && f.properties.rank)
     .sort((a, b) => a.properties.rank - b.properties.rank);
   if(!sorted.length){ el.style.display='none'; return; }
-  const top = sorted[0].properties;
-  const bot = sorted[sorted.length - 1].properties;
-  el.innerHTML =
-    `<div style="font-weight:600;margin-bottom:4px">Box Count Density</div>` +
-    `<div class="legend-row">` +
-      `<div style="width:14px;height:14px;border-radius:2px;background:rgba(255,26,26,0.60);border:1px solid #999"></div>` +
-      `<span>#1 ZIP ${top.ZIP} — ${top.count} boxes</span>` +
-    `</div>` +
-    `<div class="legend-row">` +
-      `<div style="width:14px;height:14px;border-radius:2px;background:rgba(255,26,26,0.15);border:1px solid #999"></div>` +
-      `<span>#${bot.rank} ZIP ${bot.ZIP} — ${bot.count} boxes</span>` +
-    `</div>`;
+  el.innerHTML = `<div style="font-weight:600;margin-bottom:4px">Count by ZIP</div>` +
+    sorted.map(f => {
+      const p = f.properties;
+      const op = p.fill_opacity != null ? p.fill_opacity : 0.40;
+      const t  = Math.max(0, Math.min(1, (op - 0.12) / 0.60));
+      const cr = Math.round(252 + t * (220 - 252));
+      const cg = Math.round(165 + t * (38  - 165));
+      const cb = Math.round(165 + t * (38  - 165));
+      return `<div class="legend-row">` +
+        `<div style="width:14px;height:14px;border-radius:2px;background:rgb(${cr},${cg},${cb});border:1px solid #999"></div>` +
+        `<span>#${p.rank} ZIP ${p.zip_code} — ${p.count}</span>` +
+        `</div>`;
+    }).join('');
   el.style.display = 'block';
 }
 
