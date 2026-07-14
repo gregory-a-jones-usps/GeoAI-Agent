@@ -1626,7 +1626,7 @@ class RealAgent:
             f"    bdy = spark.sql(f\"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE CAST(ZIP AS STRING) = '{{zip_code}}' LIMIT 1\").collect()",
             "    if bdy and bdy[0][0]:",
             "        geom = _convert_geom_display(json.loads(bdy[0][0]))",
-            "        fill_op = round(0.12 + 0.60 * (len(top_rows) - rank) / max(1, len(top_rows) - 1), 2)",
+            "        fill_op = round(0.12 + 0.60 * (len(top_rows) - rank) / max(1, len(top_rows) - 1), 2),"
             "        features.append({'type': 'Feature', 'geometry': geom, 'properties': {'zip_code': zip_code, 'count': cnt, 'rank': rank, 'fill_opacity': fill_op}})",
             "    rank += 1",
             "print(json.dumps({'type': 'FeatureCollection', 'features': features, 'properties': {'heat_fill': True}, 'results': results}))",
@@ -2028,16 +2028,10 @@ class GISAgent:
             if _BOUNDARY_RE.search(question):
                 return _INTENT_HANDLERS["boundary"](ra, question, {}, history_list)
 
-            # ── Deterministic ZIP ranking / count / lookup pre-checks ───────────
+            # ── Deterministic zip_count / spatial_lookup pre-checks ──────────────
+            # Fires when a 5-digit ZIP is present and a layer keyword is present.
             _has_zip = bool(_ZIP_PRESENT_RE.search(question))
             _has_layer_kw = any(w in q_lower for w in ["box", "collection", "cpms", "facilit", "office", "plant"])
-            _is_zip_ranking = (
-                ("zip" in q_lower or "zip code" in q_lower or "zips" in q_lower)
-                and _has_layer_kw
-                and bool(re.search(r"\b(top|bottom|highest|lowest|most|least)\b", q_lower))
-            )
-            if _is_zip_ranking:
-                return _INTENT_HANDLERS["zip_ranking"](ra, question, {}, history_list)
             if _has_zip and _has_layer_kw:
                 if _COUNT_QUERY_RE.search(question):
                     return _INTENT_HANDLERS["zip_count"](ra, question, {}, history_list)
@@ -2063,7 +2057,7 @@ class GISAgent:
         if _zm and result.map_data is not None:
             _z = _zm.group(1)
             _props = result.map_data.get("properties") or {}
-            if not _props.get("boundary_type") and not _props.get("weather_alerts"):
+            if not _props.get("boundary_type") and not _props.get("weather_alerts") and not _props.get("sa_rings"):
                 def _do_zip_overlay():
                     try:
                         _bcode = _build_code(
