@@ -34,7 +34,7 @@ _FACILITIES_GENIE_SPACE = (
 )
 
 # LLM endpoint for intent classification
-_LLM_CLASSIFY_ENDPOINT = os.environ.get("LLM_ENDPOINT", "databricks-meta-llama-3-3-70b-instruct")
+_LLM_CLASSIFY_ENDPOINT = os.environ.get("LLM_ENDPOINT", "mas-33c3b825-endpoint")
 
 _SA_COLORS = {
     "5": "#22c55e",
@@ -546,6 +546,7 @@ sa_containment → find USPS facilities or collection boxes INSIDE a service are
                  params: {"origin": "<resolved from history if vague>", "breaks": "<from history if needed>", "layer": "facilities|boxes"}
 nearest_service_area → find nearest facility to a reference, then show its service area rings
                  params: {"reference_location": "<address/place>", "breaks": "<comma-sep minutes>"}
+                 note: layer is always facilities
 nearest        → find the single nearest facility or collection box
                  params: {"layer": "facilities|boxes", "reference_location": "<address/place>"}
 boundary       → show the map polygon for a geographic entity (ZIP, state, county, district, region, etc.)
@@ -561,9 +562,9 @@ weather_alerts → show active NWS weather alerts for a state or nationwide
                  params: {"state": "<2-letter abbr or null>"}
 weather_containment → find facilities/boxes within active weather alert polygons
                  params: {"layer": "facilities|boxes", "state": "<2-letter abbr or null>"}
-genie          → everything else: collection box counts, operational stats, box types, installation/removal
-                 dates, coverage by district/city/state, address lookups — any SQL question about USPS
-                 collection box data that the map tools above cannot handle
+genie          → everything else: collection box counts, facility counts, operational stats, box types,
+                 installation/removal dates, coverage by district/city/state, address lookups — any SQL
+                 question about USPS collection box or facility data the map tools above cannot handle
                  params: {}
 
 LAYER RULES:
@@ -616,6 +617,58 @@ def _classify_intent_llm(
         return parsed
     except Exception:
         return {"intent": "genie"}
+
+
+_SYNTHESIZE_SYSTEM = (
+    "You are a concise assistant for a USPS GIS application. Given a user question and a "
+    "structured tool result, write one or two clear sentences that directly answer the question. "
+    "Include key facts: names, counts, distances, travel times. Use plain English. "
+    "Do not say 'Based on the results' or repeat the question. Return only the answer text."
+)
+
+
+def _synthesize_answer(
+    question: str,
+    result: GeoResponse,
+    w: Any,
+    llm_endpoint: str,
+) -> str:
+    """Narrate a structured GeoResponse into natural language. Falls back to original on any error."""
+    payload = f"Question: {question}\nResult: {result.answer}"
+    if result.map_data:
+        features = result.map_data.get("features", [])
+        pts = sum(
+            1 for f in features
+            if isinstance(f.get("geometry"), dict) and f["geometry"].get("type") == "Point"
+        )
+        rings = sum(
+            1 for f in features
+            if isinstance(f.get("geometry"), dict)
+            and f["geometry"].get("type") in ("Polygon", "MultiPolygon")
+            and f.get("properties", {}).get("break_minutes")
+        )
+        if rings:
+            payload += f"\nDrive-time rings on map: {rings}"
+        elif pts:
+            payload += f"\nPoints on map: {pts}"
+    try:
+        resp = w.api_client.do(
+            "POST",
+            f"/serving-endpoints/{llm_endpoint}/invocations",
+            body={"input": [
+                {"role": "system", "content": _SYNTHESIZE_SYSTEM},
+                {"role": "user", "content": payload},
+            ], "max_tokens": 128, "temperature": 0.0},
+        )
+        if isinstance(resp, dict) and "output" in resp:
+            text = (resp["output"][0]["content"][0]["text"] or "").strip()
+        elif isinstance(resp, dict) and "choices" in resp:
+            text = (resp["choices"][0]["message"]["content"] or "").strip()
+        else:
+            return result.answer
+        return text or result.answer
+    except Exception:
+        return result.answer
 
 
 class RealAgent:
@@ -687,8 +740,18 @@ class RealAgent:
         return None, "Timed out"
 
     def _handle_geocode(self, question: str) -> GeoResponse:
-        address = re.sub(r"\bgeocode\b", "", question, flags=re.I)
-        address = re.sub(r"\s*Context:.*$", "", address).strip()
+        # Extract actual address/place from natural language wording
+        _q = re.sub(r"\s*Context:.*$", "", question, flags=re.I | re.S).strip()
+        _addr_m = (
+            re.search(r'\b(?:find|get|what\s+(?:are|is))\s+(?:the\s+)?coordinates?\s+(?:for|of)\s+(.+)', _q, re.I)
+            or re.search(r'\bcoordinates?\s+(?:for|of)\s+(.+)', _q, re.I)
+            or re.search(r'\bgeolocate\s+(.+)', _q, re.I)
+            or re.search(r'\bgeocode\s+(.+)', _q, re.I)
+        )
+        if _addr_m:
+            address = _addr_m.group(1).strip(" ?.,")
+        else:
+            address = re.sub(r"\bgeocode\b", "", _q, flags=re.I).strip(" ?.")
         code = _build_code(
             _SPARK_SETUP,
             _GA_SETUP,
@@ -700,7 +763,7 @@ class RealAgent:
             "    result = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal').run(df)",
             "    output = []",
             "    for row in result.select('address', 'geocode_location', 'Score', 'Status', 'Match_addr').collect():",
-            "        if row.Status == 'M' and row.geocode_location:",
+            "        if row.Status in ('M', 'T') and row.geocode_location:",
             "            loc = row.geocode_location",
             "            output.append({'address': row.address, 'x': loc.x, 'y': loc.y, 'score': row.Score, 'match': row.Match_addr})",
             "    print(json.dumps(output))",
@@ -724,8 +787,17 @@ class RealAgent:
                 if item.get("x") is not None and item.get("y") is not None
             ]
             map_data = {"type": "FeatureCollection", "features": features} if features else None
-            match_addr = parsed[0].get("match", address) if parsed else address
-            return GeoResponse(answer=f"Geocoded: {match_addr}", map_data=map_data, sources=["geoanalytics-engine"])
+            if parsed:
+                match_addr = parsed[0].get("match", address)
+                px = parsed[0].get("x")
+                py = parsed[0].get("y")
+                if px is not None and py is not None:
+                    answer_text = f"Geocoded: {match_addr} \u2014 Latitude: {round(py, 6)}, Longitude: {round(px, 6)}"
+                else:
+                    answer_text = f"Geocoded: {match_addr}"
+            else:
+                answer_text = f"No match found for: {address}"
+            return GeoResponse(answer=answer_text, map_data=map_data, sources=["geoanalytics-engine"])
         except Exception:
             return GeoResponse(answer=f"Geocode raw output: {str(data)[:1000]}", map_data=None, sources=["debug"])
 
@@ -1594,8 +1666,13 @@ class RealAgent:
         d = intent_data or {}
         layer = d.get("layer") or ("boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities")
         limit_m = re.search(r"\btop\s+(\d+)\b", q)
-        limit_n = int(limit_m.group(1)) if limit_m else 10
-        city, state = self._extract_city_state(question)
+        _extracted_city, _extracted_state = self._extract_city_state(question)
+        city = d.get("city") or _extracted_city
+        state = d.get("state") or _extracted_state
+        try:
+            limit_n = int(d["limit"]) if d.get("limit") is not None else (int(limit_m.group(1)) if limit_m else 10)
+        except (ValueError, TypeError):
+            limit_n = int(limit_m.group(1)) if limit_m else 10
 
         if layer == "boxes":
             base = f"SELECT ZIP5 AS zip_code, COUNT(*) AS cnt FROM {_TBL_BOXES} WHERE ZIP5 IS NOT NULL"
@@ -1846,6 +1923,10 @@ class RealAgent:
             return GeoResponse(answer=f"Weather containment raw output: {str(data_out)[:500]}", map_data=None, sources=["debug"])
 
     def _pick_genie_space(self, question: str) -> str:
+        q = question.lower()
+        if any(w in q for w in ["facilit", "office", "plant", "p&dc", "ndc", "sdc", "rpdc",
+                                 "adc", "aadc", "amc", "bmc", "cfs", "vmf"]):
+            return _FACILITIES_GENIE_SPACE
         return _CPMS_GENIE_SPACE
 
     def _parse_genie_response(self, status: Dict[str, Any]) -> Dict[str, Any]:
@@ -2072,6 +2153,21 @@ class GISAgent:
         result = await loop.run_in_executor(None, _run)
 
         # ── ZIP boundary overlay ─────────────────────────────────────────────
+        # ── LLM answer synthesis ───────────────────────────────────────────────────────────
+        # Skip genie (already natural language), weather (multi-line), errors, debug
+        _skip_sources = {"genie-space", "debug", "noaa-nws", "noaa"}
+        if (
+            result.answer
+            and not any(s in _skip_sources for s in (result.sources or []))
+            and not result.answer.lower().startswith(("error", "could not", "please ", "no "))
+        ):
+            _llm_ep = os.environ.get("LLM_ENDPOINT", _LLM_CLASSIFY_ENDPOINT)
+            _synthesized = await loop.run_in_executor(
+                None,
+                lambda: _synthesize_answer(question, result, ra.w, _llm_ep),
+            )
+            result = GeoResponse(answer=_synthesized, map_data=result.map_data, sources=result.sources)
+
         # Whenever a 5-digit ZIP appears in the question, always fetch and pin
         # its boundary on the map, regardless of which intent handled the query.
         _zm = re.search(r'\b(\d{5})\b', question)
