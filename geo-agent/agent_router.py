@@ -2201,6 +2201,24 @@ class GISAgent:
                 if _sa_handler:
                     return _sa_handler(ra, question, _sa_data, history_list)
 
+            # ── Deterministic style/color pre-check ──────────────────────────────
+            # Catches "make zip 10025 red", "color it blue", "paint the boundary orange".
+            # Extracts ZIP from question, or falls back to most recent 5-digit ZIP in
+            # conversation history (supports "make it red" after showing a ZIP boundary).
+            if _STYLE_RE.search(question) and _parse_style(question).get("user_color"):
+                _style_zip_m = re.search(r'\b(\d{5})\b', question)
+                if not _style_zip_m:
+                    for _hmsg in reversed(history_list):
+                        if isinstance(_hmsg, dict):
+                            _style_zip_m = re.search(r'\b(\d{5})\b', str(_hmsg.get('content', '')))
+                            if _style_zip_m:
+                                break
+                if _style_zip_m:
+                    return _INTENT_HANDLERS["boundary"](ra, question, {
+                        "boundary_type": "zip",
+                        "boundary_value": _style_zip_m.group(1),
+                    }, history_list)
+
             # ── Deterministic geocode pre-check ───────────────────────────────────
             # "geocode X", "geolocate X", "find/get coordinates of X"
             if _GEOCODE_RE.search(question):
