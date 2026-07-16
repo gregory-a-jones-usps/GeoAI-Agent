@@ -140,12 +140,18 @@ _NEAREST_RE = re.compile(
     re.I,
 )
 
-# Regex for deterministic style/color change requests
-# Catches: "make zip 10025 red", "color it blue", "paint the boundary orange"
+# Regex for deterministic style/color/shape change requests
+# Catches: "make zip 10025 red", "color it blue", "make the points green squares",
+#          "show as diamonds", "change the color to purple"
 _STYLE_RE = re.compile(
+    # Color-bearing: 'make/color/paint/highlight ... <colorword>'
     r'\b(?:make|color|colour|paint|highlight)\b[^.!?\n]{0,80}'
     r'\b(?:red|blue|green|orange|purple|yellow|pink|teal|cyan|white|black|gray|grey|indigo|amber|lime|navy|maroon|gold|silver)\b'
-    r'|\bchange\s+(?:the\s+)?(?:color|colour)\b',
+    # 'change the color to ...'
+    r'|\bchange\s+(?:the\s+)?(?:color|colour)\b'
+    # Shape-only: 'make/show/use/render/display ... squares/diamonds/etc.'
+    r'|\b(?:make|show|use|render|display)\b[^.!?\n]{0,60}'
+    r'\b(?:square|triangle|diamond|star|cross|circle)s?\b',
     re.I,
 )
 
@@ -599,12 +605,6 @@ weather_alerts → show active NWS weather alerts for a state or nationwide
                  params: {"state": "<2-letter abbr or null>"}
 weather_containment → find facilities/boxes within active weather alert polygons
                  params: {"layer": "facilities|boxes", "state": "<2-letter abbr or null>"}
-restyle        → change the visual style (color, marker shape) of the current map layer without
-                 re-querying data; the user references an already-displayed ZIP, feature, or layer
-                 params: {"color": "<color name or null>", "shape": "<shape name or null>",
-                          "target_zip": "<5-digit ZIP if explicitly stated, else null>"}
-                 examples: "make it red", "change color to purple", "use blue markers",
-                           "can you make that orange", "switch to green"
 genie          → everything else: collection box counts, facility counts, operational stats, box types,
                  installation/removal dates, coverage by district/city/state, address lookups — any SQL
                  question about USPS collection box or facility data the map tools above cannot handle
@@ -2148,6 +2148,21 @@ class GISAgent:
         history_list = list(history or [])
         ra = self._real_agent
 
+        # ── Resolve vague ZIP pronouns before routing ─────────────────────────
+        # "how many deliveries in this zip code" → "how many deliveries in 77002"
+        # Must happen before _run() so every pre-check and Genie see the real ZIP.
+        if re.search(r'\b(?:this|that|the|same)\s+zip(?:\s+code)?\b', question, re.I) \
+                and not re.search(r'\b\d{5}\b', question):
+            for _hmsg in reversed(history_list):
+                if isinstance(_hmsg, dict):
+                    _hz = re.search(r'\b(\d{5})\b', str(_hmsg.get('content', '')))
+                    if _hz:
+                        question = re.sub(
+                            r'\b(?:this|that|the|same)\s+zip(?:\s+code)?\b',
+                            _hz.group(1), question, flags=re.I
+                        )
+                        break
+
         def _run():
             q_lower = question.lower()
 
@@ -2244,6 +2259,44 @@ class GISAgent:
                 if _sa_handler:
                     return _sa_handler(ra, question, _sa_data, history_list)
 
+            # ── Deterministic style/color/shape pre-check ────────────────────────
+            # Catches "make zip 10025 red", "make the points green squares",
+            # "show as diamonds", "change the color to purple".
+            # Fires on user_color OR user_shape. If a ZIP is found (question or
+            # history), re-draws that ZIP boundary with the new style. Otherwise
+            # returns a restyle_only signal so the frontend re-renders existing
+            # layers in place without a new data fetch.
+            if _STYLE_RE.search(question):
+                _usr_sty = _parse_style(question)
+                if _usr_sty.get("user_color") or _usr_sty.get("user_shape"):
+                    _style_zip_m = re.search(r'\b(\d{5})\b', question)
+                    if not _style_zip_m:
+                        for _hmsg in reversed(history_list):
+                            if isinstance(_hmsg, dict):
+                                _style_zip_m = re.search(r'\b(\d{5})\b', str(_hmsg.get('content', '')))
+                                if _style_zip_m:
+                                    break
+                    if _style_zip_m:
+                        return _INTENT_HANDLERS["boundary"](ra, question, {
+                            "boundary_type": "zip",
+                            "boundary_value": _style_zip_m.group(1),
+                        }, history_list)
+                    # No specific location — signal the frontend to restyle existing layers
+                    _c = _usr_sty.get("user_color", "")
+                    _s = _usr_sty.get("user_shape", "")
+                    _cname = next((k for k, v in {
+                        "red": "#ef4444", "blue": "#3b82f6", "green": "#22c55e",
+                        "orange": "#f97316", "purple": "#a855f7", "yellow": "#eab308",
+                        "pink": "#ec4899", "teal": "#14b8a6",
+                    }.items() if v == _c), _c)
+                    _desc = " ".join(filter(None, [_cname, _s + "s" if _s else ""]))
+                    return GeoResponse(
+                        answer=f"Styling map markers as {_desc or 'updated style'}.",
+                        map_data={"type": "FeatureCollection", "features": [],
+                                  "properties": {"restyle_only": True}},
+                        sources=["geo-agent"],
+                    )
+
             # ── Deterministic geocode pre-check ───────────────────────────────────
             # "geocode X", "geolocate X", "find/get coordinates of X"
             if _GEOCODE_RE.search(question):
@@ -2281,15 +2334,32 @@ class GISAgent:
 
         result = await loop.run_in_executor(None, _run)
 
-        # ── ZIP boundary overlay ─────────────────────────────────────────────
-        # ── LLM answer synthesis ───────────────────────────────────────────────────────────
-        # Skip genie (already natural language), weather (multi-line), errors, debug
         # Propagate user style (color/shape) to map_data.properties so the frontend
         # knows how to render — covers both ZIP-redraw and restyle_only responses.
-        _user_style = _parse_style(question)
+        _cw2 = {
+            "red": "#ef4444", "blue": "#3b82f6", "green": "#22c55e", "orange": "#f97316",
+            "purple": "#a855f7", "yellow": "#eab308", "pink": "#ec4899", "teal": "#14b8a6",
+            "cyan": "#06b6d4", "white": "#f8fafc", "black": "#0f172a", "gray": "#6b7280",
+            "grey": "#6b7280", "indigo": "#6366f1", "amber": "#f59e0b", "lime": "#84cc16",
+            "navy": "#1e3a5f", "maroon": "#7f1d1d", "gold": "#fbbf24", "silver": "#94a3b8",
+        }
+        _sw2 = ["circle", "square", "triangle", "diamond", "star", "cross", "pin"]
+        _q2 = (question or "").lower()
+        _user_style: dict = {}
+        for _uw, _uh in _cw2.items():
+            if re.search(rf"\b{_uw}\b", _q2):
+                _user_style["user_color"] = _uh
+                break
+        for _ush in _sw2:
+            if re.search(rf"\b{_ush}s?\b", _q2):
+                _user_style["user_shape"] = _ush.rstrip("s")
+                break
         if _user_style and result.map_data is not None:
             result.map_data.setdefault("properties", {}).update(_user_style)
 
+        # ── ZIP boundary overlay ─────────────────────────────────────────────
+        # ── LLM answer synthesis ───────────────────────────────────────────────────────────
+        # Skip genie (already natural language), weather (multi-line), errors, debug
         _skip_sources = {"genie-space", "debug", "noaa-nws", "noaa"}
         if (
             result.answer
