@@ -112,6 +112,15 @@ _NEAREST_RE = re.compile(
     re.I,
 )
 
+# Regex for deterministic style/color change requests
+# Catches: "make zip 10025 red", "color it blue", "paint the boundary orange"
+_STYLE_RE = re.compile(
+    r'\b(?:make|color|colour|paint|highlight)\b[^.!?\n]{0,80}'
+    r'\b(?:red|blue|green|orange|purple|yellow|pink|teal|cyan|white|black|gray|grey|indigo|amber|lime|navy|maroon|gold|silver)\b'
+    r'|\bchange\s+(?:the\s+)?(?:color|colour)\b',
+    re.I,
+)
+
 # Regex for deterministic boundary pre-check
 _BOUNDARY_RE = re.compile(
     r'\b(?:boundary|boundaries|outline)\s+(?:of|for)\b'
@@ -562,6 +571,12 @@ weather_alerts → show active NWS weather alerts for a state or nationwide
                  params: {"state": "<2-letter abbr or null>"}
 weather_containment → find facilities/boxes within active weather alert polygons
                  params: {"layer": "facilities|boxes", "state": "<2-letter abbr or null>"}
+restyle        → change the visual style (color, marker shape) of the current map layer without
+                 re-querying data; the user references an already-displayed ZIP, feature, or layer
+                 params: {"color": "<color name or null>", "shape": "<shape name or null>",
+                          "target_zip": "<5-digit ZIP if explicitly stated, else null>"}
+                 examples: "make it red", "change color to purple", "use blue markers",
+                           "can you make that orange", "switch to green"
 genie          → everything else: collection box counts, facility counts, operational stats, box types,
                  installation/removal dates, coverage by district/city/state, address lookups — any SQL
                  question about USPS collection box or facility data the map tools above cannot handle
@@ -2200,24 +2215,6 @@ class GISAgent:
                 _sa_handler = _INTENT_HANDLERS.get(_sa_data["intent"])
                 if _sa_handler:
                     return _sa_handler(ra, question, _sa_data, history_list)
-
-            # ── Deterministic style/color pre-check ──────────────────────────────
-            # Catches "make zip 10025 red", "color it blue", "paint the boundary orange".
-            # Extracts ZIP from question, or falls back to most recent 5-digit ZIP in
-            # conversation history (supports "make it red" after showing a ZIP boundary).
-            if _STYLE_RE.search(question) and _parse_style(question).get("user_color"):
-                _style_zip_m = re.search(r'\b(\d{5})\b', question)
-                if not _style_zip_m:
-                    for _hmsg in reversed(history_list):
-                        if isinstance(_hmsg, dict):
-                            _style_zip_m = re.search(r'\b(\d{5})\b', str(_hmsg.get('content', '')))
-                            if _style_zip_m:
-                                break
-                if _style_zip_m:
-                    return _INTENT_HANDLERS["boundary"](ra, question, {
-                        "boundary_type": "zip",
-                        "boundary_value": _style_zip_m.group(1),
-                    }, history_list)
 
             # ── Deterministic geocode pre-check ───────────────────────────────────
             # "geocode X", "geolocate X", "find/get coordinates of X"
