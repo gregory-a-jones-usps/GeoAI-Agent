@@ -574,7 +574,7 @@ function showMap(geojson){
 
   } else if(boundaryType){
     // ── Named boundary: ZIP/ZIP3 = no fill, thick outline; others = light fill
-    const clr = BCLR[boundaryType] || '#60a5fa';
+    const clr = props.user_color || BCLR[boundaryType] || '#60a5fa';
     const isZipBdy = boundaryType === 'zip' || boundaryType === 'zip3';
     haloLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
@@ -631,6 +631,9 @@ function showMap(geojson){
           return { color:'#991b1b', weight:2, opacity:0.9, fill:true,
                    fillColor:`rgb(${cr},${cg},${cb})`, fillOpacity:0.85 };
         }
+        const uClr = props.user_color || (f.properties && f.properties._color);
+        if(uClr)
+          return { color:uClr, weight:4, opacity:1, fill:true, fillColor:uClr, fillOpacity:0.15 };
         return { color:'#ff1a1a', weight:4, opacity:1, fill:false };
       },
       onEachFeature: bindPopup
