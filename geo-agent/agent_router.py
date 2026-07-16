@@ -36,34 +36,6 @@ _FACILITIES_GENIE_SPACE = (
 # LLM endpoint for intent classification
 _LLM_CLASSIFY_ENDPOINT = os.environ.get("LLM_ENDPOINT", "mas-33c3b825-endpoint")
 
-# User-specified style: color names → hex, shape names
-_COLOR_WORDS: Dict[str, str] = {
-    "red": "#ef4444",   "blue": "#3b82f6",  "green": "#22c55e",
-    "orange": "#f97316", "purple": "#a855f7", "yellow": "#eab308",
-    "pink": "#ec4899",  "teal": "#14b8a6",   "cyan": "#06b6d4",
-    "white": "#f9fafb", "black": "#111827",  "gray": "#6b7280",
-    "grey": "#6b7280",  "indigo": "#6366f1",  "amber": "#f59e0b",
-    "lime": "#84cc16",  "navy": "#1e3a8a",   "maroon": "#7f1d1d",
-    "gold": "#fbbf24",  "silver": "#9ca3af",
-}
-_SHAPE_WORDS = frozenset(["circle", "square", "triangle", "diamond", "star", "cross", "pin"])
-
-
-def _parse_style(question: str) -> Dict[str, str]:
-    """Extract optional user-specified color and/or marker shape from a natural language question."""
-    q = (question or "").lower()
-    out: Dict[str, str] = {}
-    for word, hex_val in _COLOR_WORDS.items():
-        if re.search(rf"\b{word}\b", q):
-            out["user_color"] = hex_val
-            break
-    for shape in _SHAPE_WORDS:
-        if re.search(rf"\b{shape}\b", q):
-            out["user_shape"] = shape
-            break
-    return out
-
-
 _SA_COLORS = {
     "5": "#22c55e",
     "10": "#f97316",
@@ -2015,6 +1987,44 @@ class RealAgent:
                 continue
         return {"type": "FeatureCollection", "features": features} if features else None
 
+    def _fetch_zip_boundaries_for_map(
+        self, zip_codes: list, color_map: Optional[Dict[str, str]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch ZIP polygon boundaries for a list of ZIP codes; returns GeoJSON FeatureCollection."""
+        if not zip_codes:
+            return None
+        zip_list_sql = ", ".join(f"'{z}'" for z in zip_codes[:100])
+        code = _build_code(
+            _SPARK_SETUP,
+            "import json",
+            _NORM_RINGS_FN,
+            f"rows = spark.sql(\"SELECT CAST(ZIP AS STRING) AS ZIP, PO_NAME, STATE, GEOMETRY "
+            f"FROM {_TBL_ZIP5} WHERE CAST(ZIP AS STRING) IN ({zip_list_sql})\").collect()",
+            "features = []",
+            "for row in rows:",
+            "    if row['GEOMETRY']:",
+            "        try:",
+            "            geom = _convert_geom_display(json.loads(row['GEOMETRY']))",
+            "            features.append({'type': 'Feature', 'geometry': geom, "
+            "'properties': {'ZIP': row['ZIP'], 'label': row['ZIP'], 'PO_NAME': row['PO_NAME'], 'STATE': row['STATE']}})",
+            "        except Exception:",
+            "            pass",
+            "print(json.dumps({'type': 'FeatureCollection', 'features': features}))",
+        )
+        data, error = self._run_cluster_code(code)
+        if error or not data or data.strip() in ("", "null"):
+            return None
+        try:
+            parsed = json.loads(data)
+            if color_map:
+                for f in parsed.get("features", []):
+                    z = str(f.get("properties", {}).get("ZIP", ""))
+                    if z in color_map:
+                        f["properties"]["_color"] = color_map[z]
+            return parsed if parsed.get("features") else None
+        except Exception:
+            return None
+
     def _handle_genie(self, question: str) -> GeoResponse:
         result = self._query_genie(question)
         answer = result.get("answer", "No answer returned")
@@ -2026,10 +2036,17 @@ class RealAgent:
             col_lower = [c.lower() for c in columns]
             zip_col_idxs = [i for i, c in enumerate(col_lower) if "zip" in c]
             if zip_col_idxs:
+                # Detect a count/numeric column for heat fill (e.g. delivery counts)
+                _count_kw = ("count", "cnt", "total", "num", "delivery", "deliveries", "volume", "qty")
+                count_col_idx = next(
+                    (i for i, c in enumerate(col_lower) if any(kw in c for kw in _count_kw) and i not in zip_col_idxs),
+                    None,
+                )
                 _col_colors = ["#ef4444", "#22c55e", "#f97316", "#3b82f6", "#a855f7"]
                 seen: set = set()
                 all_zips: list = []
                 color_map: dict = {}
+                count_map: dict = {}
                 for ci_num, ci in enumerate(zip_col_idxs[:5]):
                     clr = _col_colors[ci_num % len(_col_colors)]
                     for row in rows:
@@ -2038,13 +2055,26 @@ class RealAgent:
                             seen.add(val)
                             all_zips.append(val)
                             color_map[val] = clr
+                            if count_col_idx is not None and row[count_col_idx] is not None:
+                                try:
+                                    count_map[val] = float(row[count_col_idx])
+                                except (ValueError, TypeError):
+                                    pass
                 if all_zips:
                     map_data = self._fetch_zip_boundaries_for_map(all_zips, color_map)
-        # Last resort: scan the answer text for ZIP codes and plot their boundaries
-        if not map_data:
-            _ans_zips = re.findall(r"\b(\d{5})\b", answer)
-            if _ans_zips:
-                map_data = self._fetch_zip_boundaries_for_map(_ans_zips[:20])
+                    # Heat fill when count data present (top N ZIP heat map)
+                    if map_data and count_map and len(count_map) > 1:
+                        _max_c = max(count_map.values()) or 1
+                        _min_c = min(count_map.values())
+                        _rng = max(_max_c - _min_c, 1.0)
+                        for f in map_data.get("features", []):
+                            z = str(f.get("properties", {}).get("ZIP", ""))
+                            if z in count_map:
+                                f["properties"]["fill_opacity"] = round(
+                                    0.12 + 0.60 * (count_map[z] - _min_c) / _rng, 2
+                                )
+                                f["properties"]["count"] = int(count_map[z])
+                        map_data.setdefault("properties", {})["heat_fill"] = True
         return GeoResponse(answer=answer, map_data=map_data, sources=["genie-space"])
 
 
@@ -2208,13 +2238,6 @@ class GISAgent:
 
         result = await loop.run_in_executor(None, _run)
 
-        # ── User-specified style (color / marker shape) ───────────────────────
-        # Store at the FeatureCollection level so the frontend can apply them
-        # to every feature, including the async ZIP overlay added below.
-        _user_style = _parse_style(question)
-        if _user_style and result.map_data:
-            result.map_data.setdefault("properties", {}).update(_user_style)
-
         # ── ZIP boundary overlay ─────────────────────────────────────────────
         # ── LLM answer synthesis ───────────────────────────────────────────────────────────
         # Skip genie (already natural language), weather (multi-line), errors, debug
@@ -2222,7 +2245,7 @@ class GISAgent:
         if (
             result.answer
             and not any(s in _skip_sources for s in (result.sources or []))
-            and not result.answer.lower().startswith(("error", "could not", "please ", "no ", "top ", "geocoded", "geocode ", "boundary", "boundaries", "no match"))
+            and not result.answer.lower().startswith(("error", "could not", "please ", "no "))
         ):
             _llm_ep = os.environ.get("LLM_ENDPOINT", _LLM_CLASSIFY_ENDPOINT)
             _synthesized = await loop.run_in_executor(
