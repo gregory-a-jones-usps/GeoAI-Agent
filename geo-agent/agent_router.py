@@ -83,6 +83,34 @@ def _is_zip_ranking(question: str) -> bool:
     has_subject = any(w in q for w in ["box", "boxes", "collection", "cpms", "facility", "facilities", "office", "plant"])
     return has_zip and has_rank and has_subject
 
+# Color and shape vocabulary for deterministic style parsing
+_COLOR_WORDS: Dict[str, str] = {
+    "red": "#ef4444", "blue": "#3b82f6", "green": "#22c55e", "orange": "#f97316",
+    "purple": "#a855f7", "yellow": "#eab308", "pink": "#ec4899", "teal": "#14b8a6",
+    "cyan": "#06b6d4", "white": "#f8fafc", "black": "#0f172a", "gray": "#6b7280",
+    "grey": "#6b7280", "indigo": "#6366f1", "amber": "#f59e0b", "lime": "#84cc16",
+    "navy": "#1e3a5f", "maroon": "#7f1d1d", "gold": "#fbbf24", "silver": "#94a3b8",
+}
+_SHAPE_WORDS: frozenset = frozenset([
+    "circle", "square", "triangle", "diamond", "star", "cross", "pin",
+])
+
+
+def _parse_style(question: str) -> Dict[str, str]:
+    """Extract user_color (hex) and user_shape from a natural-language style request."""
+    q = (question or "").lower()
+    out: Dict[str, str] = {}
+    for word, hex_val in _COLOR_WORDS.items():
+        if re.search(rf"\b{word}\b", q):
+            out["user_color"] = hex_val
+            break
+    for shape in _SHAPE_WORDS:
+        if re.search(rf"\b{shape}s?\b", q):
+            out["user_shape"] = shape.rstrip("s")
+            break
+    return out
+
+
 # Regex for deterministic weather_alerts / weather_containment pre-checks
 _WEATHER_RE = re.compile(
     r'\bw[ea]+ther\b'
@@ -2256,6 +2284,12 @@ class GISAgent:
         # ── ZIP boundary overlay ─────────────────────────────────────────────
         # ── LLM answer synthesis ───────────────────────────────────────────────────────────
         # Skip genie (already natural language), weather (multi-line), errors, debug
+        # Propagate user style (color/shape) to map_data.properties so the frontend
+        # knows how to render — covers both ZIP-redraw and restyle_only responses.
+        _user_style = _parse_style(question)
+        if _user_style and result.map_data is not None:
+            result.map_data.setdefault("properties", {}).update(_user_style)
+
         _skip_sources = {"genie-space", "debug", "noaa-nws", "noaa"}
         if (
             result.answer

@@ -103,6 +103,7 @@ Try:
 // ── Conversation history — rolling last 10 messages (5 turns) ────────────
 const MAX_HISTORY = 10;
 let conversationHistory = [];
+let lastMapData = null;  // tracks last rendered GeoJSON for restyle_only re-renders
 
 function pushHistory(role, content){
   conversationHistory.push({ role, content });
@@ -573,7 +574,7 @@ function showMap(geojson){
 
   } else if(boundaryType){
     // ── Named boundary: ZIP/ZIP3 = no fill, thick outline; others = light fill
-    const defaultClr = BCLR[boundaryType] || '#60a5fa';
+    const clr = BCLR[boundaryType] || '#60a5fa';
     const isZipBdy = boundaryType === 'zip' || boundaryType === 'zip3';
     haloLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
@@ -581,11 +582,8 @@ function showMap(geojson){
     }).addTo(map);
     polyLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
-      style: f => {
-        const clr = props.user_color || (f.properties && f.properties._color) || defaultClr;
-        return { color:clr, weight:isZipBdy ? 5 : 2.5, opacity:1,
-                 fill:!isZipBdy, fillColor:clr, fillOpacity:isZipBdy ? 0 : 0.08 };
-      },
+      style: ()=>({ color:clr, weight:isZipBdy ? 5 : 2.5, opacity:1,
+                    fill:!isZipBdy, fillColor:clr, fillOpacity:isZipBdy ? 0 : 0.08 }),
       onEachFeature: bindPopup
     }).addTo(map);
 
@@ -615,7 +613,7 @@ function showMap(geojson){
       }).addTo(map);
     } catch(e){}
   } else {
-    // ── Default: white halo + user/feature color, heat polygon, or red outline
+    // ── Default: white halo + red / heat polygon ─────────────────────────
     haloLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
       style: ()=>({ color:'#ffffff', weight:7, opacity:0.65, fill:false, interactive:false })
@@ -623,9 +621,6 @@ function showMap(geojson){
     polyLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
       style: f => {
-        const uClr = props.user_color || (f.properties && f.properties._color);
-        if(uClr)
-          return { color:uClr, weight:4, opacity:1, fill:true, fillColor:uClr, fillOpacity:0.15 };
         if(heatFill){
           const op = (f.properties && f.properties.fill_opacity != null)
             ? f.properties.fill_opacity : 0.40;
@@ -647,15 +642,7 @@ function showMap(geojson){
   L.geoJSON(geojson, {
     filter: f => isPoint(f),
     pointToLayer:(f,ll)=>{
-      const fp = f.properties || {};
-      const isBox = fp._layer === 'boxes';
-      const uClr = props.user_color || fp._color || null;
-      const uShp = props.user_shape || fp._marker_shape || null;
-      if(uClr || uShp){
-        const clr = uClr || DEFAULT_PIN_COLOR;
-        if(uShp && uShp !== 'pin') return L.marker(ll, { icon: makeShapeIcon(uShp, clr) });
-        return L.marker(ll, { icon: isBox ? makeBoxIcon(clr) : makeIcon(clr) });
-      }
+      const isBox = (f.properties||{})._layer === 'boxes';
       const pin = colorByType ? resolvePin(f) : { color:DEFAULT_PIN_COLOR, label:DEFAULT_PIN_LABEL };
       if(colorByType) usedLabels.add(isBox ? 'Collection Box' : pin.label);
       const icon = isBox ? makeBoxIcon(pin.color || '#16a34a') : makeIcon(pin.color);
@@ -762,8 +749,20 @@ async function ask(){
     removeThinking();
     addMsg(data.answer,'bot',data.sources);
     pushHistory('assistant', data.answer);
-    if(data.map_data)showMap(data.map_data);
-    else document.getElementById('map-status').textContent='No spatial data in response';
+    if(data.map_data){
+      if(data.map_data.properties && data.map_data.properties.restyle_only && lastMapData){
+        // User requested a style change with no new data — re-render last layer with merged style
+        const reStyled = Object.assign({}, lastMapData);
+        reStyled.properties = Object.assign({}, reStyled.properties || {}, data.map_data.properties);
+        delete reStyled.properties.restyle_only;
+        showMap(reStyled);
+      } else {
+        lastMapData = data.map_data;
+        showMap(data.map_data);
+      }
+    } else {
+      document.getElementById('map-status').textContent='No spatial data in response';
+    }
   }catch(e){
     removeThinking();
     addMsg('Error: '+e.message,'bot');
