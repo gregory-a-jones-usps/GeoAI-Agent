@@ -1983,12 +1983,69 @@ class RealAgent:
                 continue
         return {"type": "FeatureCollection", "features": features} if features else None
 
+    def _fetch_zip_boundaries_for_map(
+        self, zip_codes: list, color_map: Optional[Dict[str, str]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch ZIP polygon boundaries for a list of ZIP codes; returns GeoJSON FeatureCollection."""
+        if not zip_codes:
+            return None
+        zip_list_sql = ", ".join(f"'{z}'" for z in zip_codes[:100])
+        code = _build_code(
+            _SPARK_SETUP,
+            "import json",
+            _NORM_RINGS_FN,
+            f"rows = spark.sql(\"SELECT CAST(ZIP AS STRING) AS ZIP, PO_NAME, STATE, GEOMETRY "
+            f"FROM {_TBL_ZIP5} WHERE CAST(ZIP AS STRING) IN ({zip_list_sql})\").collect()",
+            "features = []",
+            "for row in rows:",
+            "    if row['GEOMETRY']:",
+            "        try:",
+            "            geom = _convert_geom_display(json.loads(row['GEOMETRY']))",
+            "            features.append({'type': 'Feature', 'geometry': geom, "
+            "'properties': {'ZIP': row['ZIP'], 'label': row['ZIP'], 'PO_NAME': row['PO_NAME'], 'STATE': row['STATE']}})",
+            "        except Exception:",
+            "            pass",
+            "print(json.dumps({'type': 'FeatureCollection', 'features': features}))",
+        )
+        data, error = self._run_cluster_code(code)
+        if error or not data or data.strip() in ("", "null"):
+            return None
+        try:
+            parsed = json.loads(data)
+            if color_map:
+                for f in parsed.get("features", []):
+                    z = str(f.get("properties", {}).get("ZIP", ""))
+                    if z in color_map:
+                        f["properties"]["_color"] = color_map[z]
+            return parsed if parsed.get("features") else None
+        except Exception:
+            return None
+
     def _handle_genie(self, question: str) -> GeoResponse:
         result = self._query_genie(question)
         answer = result.get("answer", "No answer returned")
         rows = result.get("rows", [])
         columns = result.get("columns", [])
         map_data = self._rows_to_geojson(rows, columns)
+        # If rows contain ZIP code columns but no lat/lon, fetch and plot ZIP boundaries
+        if not map_data and rows and columns:
+            col_lower = [c.lower() for c in columns]
+            zip_col_idxs = [i for i, c in enumerate(col_lower) if "zip" in c]
+            if zip_col_idxs:
+                _col_colors = ["#ef4444", "#22c55e", "#f97316", "#3b82f6", "#a855f7"]
+                seen: set = set()
+                all_zips: list = []
+                color_map: dict = {}
+                for ci_num, ci in enumerate(zip_col_idxs[:5]):
+                    clr = _col_colors[ci_num % len(_col_colors)]
+                    for row in rows:
+                        val = str(row[ci]) if row[ci] is not None else ""
+                        if re.match(r"^\d{5}$", val) and val not in seen:
+                            seen.add(val)
+                            all_zips.append(val)
+                            color_map[val] = clr
+                if all_zips:
+                    map_data = self._fetch_zip_boundaries_for_map(all_zips, color_map)
         return GeoResponse(answer=answer, map_data=map_data, sources=["genie-space"])
 
 
