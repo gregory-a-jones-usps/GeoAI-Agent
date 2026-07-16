@@ -1924,6 +1924,10 @@ class RealAgent:
 
     def _pick_genie_space(self, question: str) -> str:
         q = question.lower()
+        # DPF / delivery point data (ams_delivery_point_t) lives in the Facilities Genie space
+        _dpf_kw = ["dpf", "delivery point", "deliveries", "delivery", "ams_delivery"]
+        if any(w in q for w in _dpf_kw):
+            return _FACILITIES_GENIE_SPACE
         if any(w in q for w in ["facilit", "office", "plant", "p&dc", "ndc", "sdc", "rpdc",
                                  "adc", "aadc", "amc", "bmc", "cfs", "vmf"]):
             return _FACILITIES_GENIE_SPACE

@@ -197,6 +197,31 @@ function makeBoxIcon(color){
   });
 }
 
+function makeShapeSvg(shape, color){
+  const c = color || '#06b6d4';
+  if(shape === 'square')
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><rect x="2" y="2" width="24" height="24" rx="3" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><rect x="9" y="9" width="10" height="10" fill="white" opacity="0.7"/></svg>`;
+  if(shape === 'triangle')
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><polygon points="14,1 27,26 1,26" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><polygon points="14,11 21,24 7,24" fill="white" opacity="0.6"/></svg>`;
+  if(shape === 'diamond')
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><polygon points="14,1 27,14 14,27 1,14" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><polygon points="14,8 21,14 14,20 7,14" fill="white" opacity="0.7"/></svg>`;
+  if(shape === 'star')
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><polygon points="14,1 17.5,10.5 27,10.5 19.5,16.5 22,26 14,20.5 6,26 8.5,16.5 1,10.5 10.5,10.5" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1"/></svg>`;
+  if(shape === 'cross')
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><rect x="11" y="1" width="6" height="26" rx="2" fill="${c}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/><rect x="1" y="11" width="26" height="6" rx="2" fill="${c}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><circle cx="14" cy="14" r="12" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><circle cx="14" cy="14" r="5" fill="white" opacity="0.8"/></svg>`;
+}
+
+function makeShapeIcon(shape, color){
+  return L.divIcon({
+    html: makeShapeSvg(shape, color),
+    className: '',
+    iconSize:    [28, 28],
+    iconAnchor:  [14, shape === 'triangle' ? 26 : 14],
+    popupAnchor: [0, -16]
+  });
+}
+
 function resolvePin(feature){
   const props = feature.properties || {};
   const raw = (props.type || props.facility_type || props.feature_type || '').toLowerCase();
@@ -238,7 +263,7 @@ function makeClusterGroup(){
   });
 }
 
-const POPUP_SKIP = new Set(['marker-color','marker-symbol','marker-size','layer','fill_opacity','_color','_severity','_layer','description','instruction']);
+const POPUP_SKIP = new Set(['marker-color','marker-symbol','marker-size','layer','fill_opacity','_color','_severity','_layer','description','instruction','_marker_shape','user_color','user_shape','label']);
 const POPUP_LABELS = {
   BOX_NBR: 'Box Number',
   BOX_ADDRESS: 'Box Address',
@@ -548,7 +573,7 @@ function showMap(geojson){
 
   } else if(boundaryType){
     // ── Named boundary: ZIP/ZIP3 = no fill, thick outline; others = light fill
-    const clr = BCLR[boundaryType] || '#60a5fa';
+    const defaultClr = BCLR[boundaryType] || '#60a5fa';
     const isZipBdy = boundaryType === 'zip' || boundaryType === 'zip3';
     haloLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
@@ -556,8 +581,11 @@ function showMap(geojson){
     }).addTo(map);
     polyLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
-      style: ()=>({ color:clr, weight:isZipBdy ? 5 : 2.5, opacity:1,
-                    fill:!isZipBdy, fillColor:clr, fillOpacity:isZipBdy ? 0 : 0.08 }),
+      style: f => {
+        const clr = props.user_color || (f.properties && f.properties._color) || defaultClr;
+        return { color:clr, weight:isZipBdy ? 5 : 2.5, opacity:1,
+                 fill:!isZipBdy, fillColor:clr, fillOpacity:isZipBdy ? 0 : 0.08 };
+      },
       onEachFeature: bindPopup
     }).addTo(map);
 
@@ -587,7 +615,7 @@ function showMap(geojson){
       }).addTo(map);
     } catch(e){}
   } else {
-    // ── Default: white halo + red / heat polygon ─────────────────────────
+    // ── Default: white halo + user/feature color, heat polygon, or red outline
     haloLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
       style: ()=>({ color:'#ffffff', weight:7, opacity:0.65, fill:false, interactive:false })
@@ -595,6 +623,9 @@ function showMap(geojson){
     polyLayer = L.geoJSON(geojson, {
       filter: f => !isPoint(f),
       style: f => {
+        const uClr = props.user_color || (f.properties && f.properties._color);
+        if(uClr)
+          return { color:uClr, weight:4, opacity:1, fill:true, fillColor:uClr, fillOpacity:0.15 };
         if(heatFill){
           const op = (f.properties && f.properties.fill_opacity != null)
             ? f.properties.fill_opacity : 0.40;
@@ -616,7 +647,15 @@ function showMap(geojson){
   L.geoJSON(geojson, {
     filter: f => isPoint(f),
     pointToLayer:(f,ll)=>{
-      const isBox = (f.properties||{})._layer === 'boxes';
+      const fp = f.properties || {};
+      const isBox = fp._layer === 'boxes';
+      const uClr = props.user_color || fp._color || null;
+      const uShp = props.user_shape || fp._marker_shape || null;
+      if(uClr || uShp){
+        const clr = uClr || DEFAULT_PIN_COLOR;
+        if(uShp && uShp !== 'pin') return L.marker(ll, { icon: makeShapeIcon(uShp, clr) });
+        return L.marker(ll, { icon: isBox ? makeBoxIcon(clr) : makeIcon(clr) });
+      }
       const pin = colorByType ? resolvePin(f) : { color:DEFAULT_PIN_COLOR, label:DEFAULT_PIN_LABEL };
       if(colorByType) usedLabels.add(isBox ? 'Collection Box' : pin.label);
       const icon = isBox ? makeBoxIcon(pin.color || '#16a34a') : makeIcon(pin.color);
