@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+
 from agent_router import get_router
 
 # ── App setup ────────────────────────────────────────────────────────────────
@@ -67,6 +68,15 @@ class GeoResponse(BaseModel):
     sources: Optional[List[str]] = Field(
         default=None, description="Data sources used to generate the answer"
     )
+
+
+class ZipBrowseBatchRequest(BaseModel):
+    city: str
+    state: str
+    center_lat: Optional[float] = None
+    center_lon: Optional[float] = None
+    limit: int = 30
+    loaded_zips: Optional[List[str]] = None
 
 
 class RequestRecord(BaseModel):
@@ -138,6 +148,21 @@ async def chat_sync(req: GeoRequest):
     """
     result = await router.handle(req.question, req.context, history=req.history)
     return result
+
+
+@app.post("/api/zip-browse-batch")
+async def zip_browse_batch(req: ZipBrowseBatchRequest):
+    data = await router.load_zip_browse_batch(
+        city=req.city,
+        state=req.state,
+        center_lat=req.center_lat,
+        center_lon=req.center_lon,
+        limit=req.limit,
+        loaded_zips=req.loaded_zips,
+    )
+    if isinstance(data, dict) and data.get("error"):
+        raise HTTPException(status_code=400, detail=data["error"])
+    return data
 
 
 @app.get("/api/health")

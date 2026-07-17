@@ -104,6 +104,8 @@ Try:
 const MAX_HISTORY = 10;
 let conversationHistory = [];
 let lastMapData = null;  // tracks last rendered GeoJSON for restyle_only re-renders
+let zipBrowseState = null;  // active center-out lazy ZIP browse session
+let zipBrowseLayer = null;  // Leaflet layer group for incrementally-loaded ZIP polygons
 
 function pushHistory(role, content){
   conversationHistory.push({ role, content });
@@ -516,6 +518,122 @@ function isPoint(f){
   return t === 'Point' || t === 'MultiPoint';
 }
 
+function resetZipBrowse(){
+  zipBrowseState = null;
+  if(zipBrowseLayer){
+    map.removeLayer(zipBrowseLayer);
+    zipBrowseLayer = null;
+  }
+  map.off('moveend', queueZipBrowseLoad);
+}
+
+function queueZipBrowseLoad(){
+  if(!zipBrowseState || zipBrowseState.loading || !zipBrowseState.hasMore) return;
+  clearTimeout(zipBrowseState.timer);
+  zipBrowseState.timer = setTimeout(loadMoreZipBrowse, 250);
+}
+
+async function loadMoreZipBrowse(){
+  if(!zipBrowseState || zipBrowseState.loading || !zipBrowseState.hasMore) return;
+  zipBrowseState.loading = true;
+  document.getElementById('map-status').textContent =
+    `Loading more ZIP boundaries for ${zipBrowseState.city}, ${zipBrowseState.state}...`;
+  try{
+    const c = map.getCenter();
+    const res = await fetch('/api/zip-browse-batch', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        city: zipBrowseState.city,
+        state: zipBrowseState.state,
+        center_lat: c.lat,
+        center_lon: c.lng,
+        limit: zipBrowseState.batchSize || 30,
+        loaded_zips: Array.from(zipBrowseState.loadedZips || [])
+      })
+    });
+    const raw = await res.text();
+    const data = JSON.parse(raw);
+    if(!res.ok) throw new Error(data.detail || `ZIP browse batch failed with status ${res.status}`);
+
+    const newFeatures = (data.features || []).filter(f => {
+      const z = f && f.properties && f.properties.ZIP;
+      return z && !zipBrowseState.loadedZips.has(z);
+    });
+    newFeatures.forEach(f => zipBrowseState.loadedZips.add(f.properties.ZIP));
+
+    if(newFeatures.length){
+      zipBrowseState.features.push(...newFeatures);
+      zipBrowseLayer.addData({ type:'FeatureCollection', features:newFeatures });
+    }
+
+    const bProps = data.properties || {};
+    zipBrowseState.hasMore    = !!bProps.has_more;
+    zipBrowseState.totalCount = bProps.total_count || zipBrowseState.totalCount || zipBrowseState.features.length;
+    zipBrowseState.batchSize  = bProps.batch_size  || zipBrowseState.batchSize  || 30;
+    lastMapData = {
+      type:'FeatureCollection',
+      features: zipBrowseState.features.slice(),
+      properties: Object.assign({}, bProps)
+    };
+    const loaded = zipBrowseState.features.length;
+    document.getElementById('feat-count').textContent = `${loaded} feature(s)`;
+    document.getElementById('map-status').textContent = zipBrowseState.hasMore
+      ? `Loaded ${loaded} of ${zipBrowseState.totalCount} ZIP boundaries`
+      : `Loaded all ${loaded} ZIP boundaries`;
+  }catch(e){
+    document.getElementById('map-status').textContent = `ZIP lazy load error: ${e.message}`;
+    zipBrowseState.hasMore = false;
+  }finally{
+    if(zipBrowseState) zipBrowseState.loading = false;
+  }
+}
+
+function startZipBrowse(geojson){
+  const props = geojson.properties || {};
+  resetZipBrowse();
+  zipBrowseState = {
+    city:       props.city,
+    state:      props.state,
+    batchSize:  props.batch_size  || 30,
+    totalCount: props.total_count || (geojson.features || []).length,
+    hasMore:    !!props.has_more,
+    loading:    false,
+    timer:      null,
+    loadedZips: new Set(),
+    features:   []
+  };
+
+  zipBrowseLayer = L.geoJSON({ type:'FeatureCollection', features:[] }, {
+    filter: f => !isPoint(f),
+    style: ()=>({ color:'#1d4ed8', weight:3, opacity:1, fill:true, fillColor:'#1d4ed8', fillOpacity:0.08 }),
+    onEachFeature: bindPopup
+  }).addTo(map);
+
+  const initialFeatures = geojson.features || [];
+  if(initialFeatures.length){
+    initialFeatures.forEach(f => {
+      const z = f && f.properties && f.properties.ZIP;
+      if(z) zipBrowseState.loadedZips.add(z);
+    });
+    zipBrowseState.features = initialFeatures.slice();
+    zipBrowseLayer.addData({ type:'FeatureCollection', features: initialFeatures });
+    try{
+      const b = zipBrowseLayer.getBounds();
+      if(b.isValid()) map.fitBounds(b, {padding:[30,30], maxZoom:13});
+    }catch(e){}
+  }
+
+  const loaded = zipBrowseState.features.length;
+  document.getElementById('feat-count').textContent = `${loaded} feature(s)`;
+  document.getElementById('map-status').textContent = zipBrowseState.hasMore
+    ? `Loaded ${loaded} of ${zipBrowseState.totalCount} ZIP boundaries`
+    : `Loaded all ${loaded} ZIP boundaries`;
+
+  map.on('moveend', queueZipBrowseLoad);
+  if(zipBrowseState.hasMore) queueZipBrowseLoad();
+}
+
 function showMap(geojson){
   const props         = geojson.properties || {};
   const colorByType   = !!props.color_by_type;
@@ -523,8 +641,15 @@ function showMap(geojson){
   const saRings       = !!props.sa_rings;
   const boundaryType  = props.boundary_type || null;
   const weatherAlerts = !!props.weather_alerts;
+  const lazyZipBrowse = !!props.lazy_zip_browse;
   const usedLabels    = new Set();
   const features      = geojson.features || [];
+
+  if(lazyZipBrowse){
+    startZipBrowse(geojson);
+    return;
+  }
+  resetZipBrowse();
   // SA-ring polygons (break_minutes set) from containment responses don't count
   // as "new" polygons — they are SA outlines we already have on the map.
   const hasNewPolygons = features.some(
@@ -538,6 +663,7 @@ function showMap(geojson){
     if(noaaLayer) map.removeLayer(noaaLayer);
     noaaLayer = null;
   }
+  if(zipBrowseLayer) { map.removeLayer(zipBrowseLayer); zipBrowseLayer = null; }
   if(pointLayer) map.removeLayer(pointLayer);
   if(routeStopLayer) map.removeLayer(routeStopLayer);
   routeStopLayer = L.layerGroup();

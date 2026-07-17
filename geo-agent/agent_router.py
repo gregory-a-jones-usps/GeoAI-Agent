@@ -72,6 +72,12 @@ _ROUTE_RE = re.compile(
 
 # Regex for deterministic zip_count / spatial_lookup pre-checks
 _ZIP_PRESENT_RE = re.compile(r'\b\d{5}\b')
+# ZIP browse: "show me zip codes for washington, dc" — must begin with a nav verb to avoid
+# matching analytical queries like "what zip code in CO has the most deliveries".
+_ZIP_BROWSE_RE = re.compile(
+    r'\b(?:show|list|map|display|plot|what\s+(?:are|is))\b[^.!?\n]{0,80}\bzips?(?:\s+codes?)?\b[^.!?\n]{0,40}\b(?:for|in|within)\s+(?P<location>.+?)\s*$',
+    re.I,
+)
 _COUNT_QUERY_RE = re.compile(r'\bhow\s+many\b|\bcount\b|\btotal\b', re.I)
 _SHOW_QUERY_RE  = re.compile(r'\b(?:show|list|find|plot|map|display|where|which|what)\b', re.I)
 
@@ -212,6 +218,50 @@ _STATE_NAMES = {
     "virginia": "VA", "washington": "WA", "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
     "district of columbia": "DC",
 }
+
+
+def _extract_zip_browse_location(question: str) -> Optional[Dict[str, str]]:
+    text = re.sub(r"\s*Context:.*$", "", question or "", flags=re.I | re.S).strip().rstrip("?.!")
+    m = _ZIP_BROWSE_RE.search(text)
+    if not m:
+        return None
+
+    raw_loc = re.sub(r"\s+", " ", m.group("location") or "").strip(" ,")
+    if not raw_loc:
+        return None
+
+    city = ""
+    state = ""
+
+    if "," in raw_loc:
+        parts = [p.strip() for p in raw_loc.split(",") if p.strip()]
+        if len(parts) >= 2:
+            city = ", ".join(parts[:-1]).strip()
+            state = parts[-1].strip()
+
+    if not city or not state:
+        m2 = re.match(r"(.+?)\s+([A-Za-z]{2})$", raw_loc)
+        if m2:
+            city = city or m2.group(1).strip()
+            state = state or m2.group(2).strip()
+
+    if not city or not state:
+        raw_lower = raw_loc.lower()
+        for state_name, abbr in sorted(_STATE_NAMES.items(), key=lambda kv: len(kv[0]), reverse=True):
+            if raw_lower.endswith(state_name):
+                city = city or raw_loc[:len(raw_loc) - len(state_name)].strip(" ,")
+                state = state or abbr
+                break
+
+    if state.lower() in _STATE_NAMES:
+        state = _STATE_NAMES[state.lower()]
+    state = (state or "").upper()
+    city = re.sub(r"^(?:the\s+)?", "", city or "", flags=re.I).strip(" ,")
+
+    if state not in _STATE_ABBRS or not city:
+        return None
+    return {"city": city, "state": state}
+
 
 _BOUNDARY_TABLES = {
     "zip": {
@@ -1536,6 +1586,147 @@ class RealAgent:
         except Exception:
             return GeoResponse(answer=f"Boundary raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
 
+    def _load_zip_browse_batch(
+        self,
+        city: str,
+        state: str,
+        center_lat: Optional[float] = None,
+        center_lon: Optional[float] = None,
+        limit: int = 30,
+        loaded_zips: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        safe_city = str(city or "").replace("'", "''").strip()
+        safe_state = str(state or "").replace("'", "''").strip().upper()
+        if not safe_city or safe_state not in _STATE_ABBRS:
+            return {"error": "Please specify a city and 2-letter state abbreviation."}
+
+        limit = max(10, min(int(limit or 30), 75))
+        loaded_zips = [str(z).zfill(5) for z in (loaded_zips or []) if str(z).strip()]
+        sql = (
+            f"SELECT ZIP, PO_NAME, STATE, GEOMETRY FROM {_TBL_ZIP5} "
+            f"WHERE UPPER(PO_NAME) LIKE UPPER('%{safe_city}%') AND UPPER(STATE) = '{safe_state}' "
+            "ORDER BY ZIP"
+        )
+
+        code = _build_code(
+            _SPARK_SETUP,
+            "import json, math",
+            _NORM_RINGS_FN,
+            "def _wm_to_lonlat(x, y):\n"
+            "    lon = (x / 20037508.34) * 180\n"
+            "    lat = (y / 20037508.34) * 180\n"
+            "    lat = 180 / math.pi * (2 * math.atan(math.exp(lat * math.pi / 180)) - math.pi / 2)\n"
+            "    return lon, lat",
+            "def _geom_center(raw_geom):\n"
+            "    rings = _norm_rings(json.loads(raw_geom))\n"
+            "    xs, ys = [], []\n"
+            "    for ring in rings[:6]:\n"
+            "        if not ring:\n"
+            "            continue\n"
+            "        step = max(1, len(ring) // 40)\n"
+            "        for pt in ring[::step]:\n"
+            "            xs.append(float(pt[0]))\n"
+            "            ys.append(float(pt[1]))\n"
+            "    if not xs or not ys:\n"
+            "        return None\n"
+            "    return _wm_to_lonlat((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)",
+            "def _dist_deg(lat1, lon1, lat2, lon2):\n"
+            "    scale = math.cos(math.radians((lat1 + lat2) / 2.0))\n"
+            "    return ((lat1 - lat2) ** 2 + ((lon1 - lon2) * scale) ** 2) ** 0.5",
+            f"rows = spark.sql({json.dumps(sql)}).collect()",
+            f"loaded = set({json.dumps(loaded_zips)})",
+            f"center_lat = {json.dumps(center_lat)}",
+            f"center_lon = {json.dumps(center_lon)}",
+            f"limit = {limit}",
+            f"city_name = {json.dumps(safe_city)}",
+            f"state_abbr = {json.dumps(safe_state)}",
+            "items = []",
+            "scope_loaded = set()",
+            "for r in rows:\n"
+            "    zip_code = str(r['ZIP']).zfill(5)\n"
+            "    raw_geom = r['GEOMETRY']\n"
+            "    if not raw_geom:\n"
+            "        continue\n"
+            "    ctr = _geom_center(raw_geom)\n"
+            "    if ctr is None:\n"
+            "        continue\n"
+            "    lon, lat = ctr\n"
+            "    item = {'ZIP': zip_code, 'PO_NAME': str(r['PO_NAME'] or ''), 'STATE': str(r['STATE'] or ''), '_center_lat': round(lat, 6), '_center_lon': round(lon, 6), '_raw_geom': raw_geom}\n"
+            "    if zip_code in loaded:\n"
+            "        scope_loaded.add(zip_code)\n"
+            "        continue\n"
+            "    items.append(item)",
+            "if items and (center_lat is None or center_lon is None):\n"
+            "    center_lat = sum(it['_center_lat'] for it in items) / len(items)\n"
+            "    center_lon = sum(it['_center_lon'] for it in items) / len(items)",
+            "for it in items:\n"
+            "    if center_lat is None or center_lon is None:\n"
+            "        it['_dist'] = 0.0\n"
+            "    else:\n"
+            "        it['_dist'] = _dist_deg(float(center_lat), float(center_lon), it['_center_lat'], it['_center_lon'])",
+            "items = sorted(items, key=lambda it: (it['_dist'], it['ZIP']))",
+            "batch = items[:limit]",
+            "features = []",
+            "for it in batch:\n"
+            "    geom = _convert_geom_display(json.loads(it['_raw_geom']))\n"
+            "    features.append({'type': 'Feature', 'geometry': geom, 'properties': {'ZIP': it['ZIP'], 'PO_NAME': it['PO_NAME'], 'STATE': it['STATE'], '_center_lat': it['_center_lat'], '_center_lon': it['_center_lon']}})",
+            "loaded_count = len(scope_loaded) + len(features)",
+            "total_count = len(scope_loaded) + len(items)",
+            "result = {\n"
+            "    'type': 'FeatureCollection',\n"
+            "    'features': features,\n"
+            "    'properties': {\n"
+            "        'boundary_type': 'zip',\n"
+            "        'lazy_zip_browse': True,\n"
+            "        'city': city_name,\n"
+            "        'state': state_abbr,\n"
+            "        'batch_size': limit,\n"
+            "        'returned_count': len(features),\n"
+            "        'loaded_count': loaded_count,\n"
+            "        'total_count': total_count,\n"
+            "        'has_more': loaded_count < total_count,\n"
+            "        'suggested_center': {'lat': round(float(center_lat), 6), 'lon': round(float(center_lon), 6)} if center_lat is not None and center_lon is not None else None\n"
+            "    }\n"
+            "}",
+            "print(json.dumps(result))",
+        )
+        data, error = self._run_cluster_code(code)
+        if error:
+            return {"error": error}
+        try:
+            parsed = json.loads(data)
+            return parsed if isinstance(parsed, dict) else {"error": "Unexpected ZIP browse response format."}
+        except Exception:
+            return {"error": f"ZIP browse raw output: {str(data)[:500]}"}
+
+    def _handle_zip_browse(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
+        d = intent_data or {}
+        city = str(d.get("city") or "").strip()
+        state = str(d.get("state") or "").strip()
+        if not city or not state:
+            loc = _extract_zip_browse_location(question)
+            if loc:
+                city = loc.get("city", city)
+                state = loc.get("state", state)
+        if not city or not state:
+            return GeoResponse(answer="Please specify a city and state to show ZIP codes.", map_data=None, sources=["geo_analytics"])
+
+        parsed = self._load_zip_browse_batch(city=city, state=state, limit=30, loaded_zips=[])
+        if parsed.get("error"):
+            return GeoResponse(answer=f"ZIP browse error: {parsed['error']}", map_data=None, sources=["geo_analytics"])
+
+        props = parsed.get("properties") or {}
+        total = int(props.get("total_count") or 0)
+        shown = len(parsed.get("features") or [])
+        area = f"{city}, {state.upper()}"
+        if total <= 0:
+            return GeoResponse(answer=f"No ZIP codes found for {area}.", map_data=None, sources=["geo_analytics"])
+        if total > shown:
+            answer = f"Found {total} ZIP codes for {area}. Showing the first {shown} nearest the map center and loading more as you pan."
+        else:
+            answer = f"Found {total} ZIP codes for {area}."
+        return GeoResponse(answer=answer, map_data=parsed, sources=["geo_analytics"])
+
     def _handle_zip_count(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
         d = intent_data or {}
         zip_code = d.get("zip_code")
@@ -1966,15 +2157,8 @@ class RealAgent:
             return GeoResponse(answer=f"Weather containment raw output: {str(data_out)[:500]}", map_data=None, sources=["debug"])
 
     def _pick_genie_space(self, question: str) -> str:
-        q = question.lower()
-        # DPF / delivery point data (ams_delivery_point_t) lives in the Facilities Genie space
-        _dpf_kw = ["dpf", "delivery point", "deliveries", "delivery", "ams_delivery"]
-        if any(w in q for w in _dpf_kw):
-            return _FACILITIES_GENIE_SPACE
-        if any(w in q for w in ["facilit", "office", "plant", "p&dc", "ndc", "sdc", "rpdc",
-                                 "adc", "aadc", "amc", "bmc", "cfs", "vmf"]):
-            return _FACILITIES_GENIE_SPACE
-        return _CPMS_GENIE_SPACE
+        # All Genie queries use the single consolidated Facilities Genie space
+        return _FACILITIES_GENIE_SPACE
 
     def _parse_genie_response(self, status: Dict[str, Any]) -> Dict[str, Any]:
         answer = ""
@@ -2068,8 +2252,188 @@ class RealAgent:
         except Exception:
             return None
 
+    def _handle_box_analytic(self, question: str) -> Optional[GeoResponse]:
+        """Direct-SQL handler for collection box analytics (cpms_co_t).
+        Covers state/city/national counts, type breakdowns, and general box lookups
+        that would otherwise fall through to Genie, which does not have this table.
+        Returns None if the question does not appear to be a box query."""
+        q = question.lower()
+        _box_kw = ("box", "boxes", "collection", "cpms", "blue box")
+        if not any(w in q for w in _box_kw):
+            return None
+
+        # ── location extraction ─────────────────────────────────────────
+        zip_m = re.search(r"\b(\d{5})\b", question)
+        zip_code = zip_m.group(1) if zip_m else None
+
+        _FULL_STATES: Dict[str, str] = {
+            "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+            "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+            "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+            "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+            "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+            "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+            "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+            "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+            "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+            "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+            "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+            "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
+            "wisconsin": "WI", "wyoming": "WY", "district of columbia": "DC",
+        }
+        state: Optional[str] = None
+        for name, abbr in _FULL_STATES.items():
+            if re.search(r"\b" + re.escape(name) + r"\b", q):
+                state = abbr
+                break
+        if not state:
+            for abbr in _STATE_ABBRS:
+                if re.search(r"\b" + re.escape(abbr.lower()) + r"\b", q):
+                    state = abbr
+                    break
+
+        city: Optional[str] = None
+        _city_m = re.search(r"\bin\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)", question)
+        if _city_m:
+            _cand = _city_m.group(1).strip()
+            if _cand.upper() not in _STATE_ABBRS and _cand.lower() not in _FULL_STATES:
+                city = _cand
+
+        # ── build WHERE clause ──────────────────────────────────────────
+        filters: list = []
+        if zip_code:
+            filters.append(f"ZIP5 = '{zip_code}'")
+        elif city and state:
+            safe_city = city.replace("'", "''")
+            filters.append(f"UPPER(CITY) LIKE UPPER('%{safe_city}%')")
+            filters.append(f"STATE = '{state}'")
+        elif city:
+            safe_city = city.replace("'", "''")
+            filters.append(f"UPPER(CITY) LIKE UPPER('%{safe_city}%')")
+        elif state:
+            filters.append(f"STATE = '{state}'")
+
+        where_clause = ("WHERE " + " AND ".join(filters)) if filters else ""
+        location_desc = (
+            zip_code
+            or (f"{city}, {state}" if city and state else None)
+            or city or (f"state {state}" if state else None)
+            or "the US"
+        )
+
+        is_count = bool(re.search(r"\b(how many|count|total|number of)\b", q))
+        is_type  = bool(re.search(r"\b(type|types|kind|kinds|breakdown|by type)\b", q))
+
+        # ── run query ───────────────────────────────────────────────────
+        if is_type:
+            sql = (
+                f"SELECT BOX_TYPE, COUNT(*) AS cnt FROM {_TBL_BOXES} "
+                f"{where_clause} GROUP BY BOX_TYPE ORDER BY cnt DESC LIMIT 20"
+            )
+            code = _build_code(
+                _SPARK_SETUP, "import json",
+                f"rows = spark.sql({json.dumps(sql)}).collect()",
+                "result = [{'type': r['BOX_TYPE'] or 'Unknown', 'count': int(r['cnt'])} for r in rows]",
+                "print(json.dumps({'rows': result}))",
+            )
+            data, error = self._run_cluster_code(code)
+            if error:
+                return GeoResponse(answer=f"Box type query error: {error}", map_data=None, sources=["cpms_co_t"])
+            try:
+                parsed = json.loads(data)
+                rows = parsed.get("rows", [])
+                if not rows:
+                    return GeoResponse(
+                        answer=f"No collection box data found for {location_desc}.",
+                        map_data=None, sources=["cpms_co_t"],
+                    )
+                lines = "\n".join(f"  {r['type']}: {r['count']:,}" for r in rows)
+                total = sum(r["count"] for r in rows)
+                return GeoResponse(
+                    answer=f"Collection box types in {location_desc} (total {total:,}):\n{lines}",
+                    map_data=None, sources=["cpms_co_t"],
+                )
+            except Exception as ex:
+                return GeoResponse(answer=f"Box type parse error: {ex}", map_data=None, sources=["cpms_co_t"])
+
+        # Count or general lookup — also plot points on the map
+        count_sql = f"SELECT COUNT(*) AS cnt FROM {_TBL_BOXES} {where_clause}"
+        pts_sql = (
+            f"SELECT BOX_NBR AS label, BOX_ADDRESS AS address, BOX_TYPE, LATITUDE, LONGITUDE "
+            f"FROM {_TBL_BOXES} {where_clause} "
+            f"AND LATITUDE IS NOT NULL AND LATITUDE != 0 "
+            f"AND LONGITUDE IS NOT NULL AND LONGITUDE != 0 LIMIT 500"
+        )
+        code = _build_code(
+            _SPARK_SETUP, "import json",
+            f"cnt   = spark.sql({json.dumps(count_sql)}).first()['cnt']",
+            f"pts   = spark.sql({json.dumps(pts_sql)}).collect()",
+            "features = []",
+            "for r in pts:",
+            "    lat, lon = float(r['LATITUDE']), float(r['LONGITUDE'])",
+            "    if -90 <= lat <= 90 and -180 <= lon <= 180:",
+            "        props = {k: r[k] for k in r.asDict() if k not in ('LATITUDE','LONGITUDE')}",
+            "        props['_layer'] = 'boxes'",
+            "        features.append({'type':'Feature','geometry':{'type':'Point','coordinates':[round(lon,6),round(lat,6)]},'properties':props})",
+            "print(json.dumps({'count': int(cnt), 'features': features}))",
+        )
+        data, error = self._run_cluster_code(code)
+        if error:
+            return GeoResponse(answer=f"Box query error: {error}", map_data=None, sources=["cpms_co_t"])
+        try:
+            parsed = json.loads(data)
+            cnt = parsed.get("count", 0)
+            features = parsed.get("features", [])
+            map_data: Optional[Dict[str, Any]] = (
+                {"type": "FeatureCollection", "features": features,
+                 "properties": {"color_by_type": False, "boundary_type": None}}
+                if features else None
+            )
+            if cnt == 0:
+                return GeoResponse(
+                    answer=f"No collection boxes found for {location_desc}.",
+                    map_data=None, sources=["cpms_co_t"],
+                )
+            shown = len(features)
+            extra = f" (showing {shown} on map)" if shown < cnt else ""
+            return GeoResponse(
+                answer=f"There are {cnt:,} collection boxes in {location_desc}{extra}.",
+                map_data=map_data, sources=["cpms_co_t"],
+            )
+        except Exception as ex:
+            return GeoResponse(answer=f"Box query parse error: {ex}", map_data=None, sources=["cpms_co_t"])
+
     def _handle_genie(self, question: str) -> GeoResponse:
-        result = self._query_genie(question)
+        # Collection boxes live in cpms_co_t — Genie does not have this table.
+        # Intercept box queries and answer directly via SQL.
+        box_result = self._handle_box_analytic(question)
+        if box_result is not None:
+            return box_result
+
+        # Normalise delivery-related terminology before sending to Genie.
+        # The word "deliveries" makes Genie think events-over-time and ask
+        # for a time period; "delivery points" maps directly to the DPF table.
+        _dpf_kw = re.compile(
+            r"\b(deliveries|delivery(?!\s+point))\b", re.IGNORECASE
+        )
+        genie_question = _dpf_kw.sub(
+            lambda m: "delivery points" if m.group().lower() in ("deliveries", "delivery") else m.group(),
+            question,
+        )
+        result = self._query_genie(genie_question)
+        # If Genie returned only clarifying text (no SQL ran), retry once with
+        # an explicit instruction to return the count and zip code.
+        if not result.get("rows") and result.get("answer"):
+            _clarif = re.compile(
+                r"\b(prefer|instead|specify|time period|date range|clarify|which table|more specific)\b",
+                re.IGNORECASE,
+            )
+            if _clarif.search(result["answer"]):
+                retry_q = (
+                    genie_question.rstrip("?. ")
+                    + " — please run the query now and return the zip code and delivery point count."
+                )
+                result = self._query_genie(retry_q)
         answer = result.get("answer", "No answer returned")
         rows = result.get("rows", [])
         columns = result.get("columns", [])
@@ -2105,19 +2469,53 @@ class RealAgent:
                                     pass
                 if all_zips:
                     map_data = self._fetch_zip_boundaries_for_map(all_zips, color_map)
-                    # Heat fill when count data present (top N ZIP heat map)
-                    if map_data and count_map and len(count_map) > 1:
+                    # Stamp count onto every feature regardless of how many ZIPs
+                    if map_data and count_map:
+                        sorted_zips = sorted(count_map, key=count_map.get, reverse=True)
+                        rank_map = {z: r + 1 for r, z in enumerate(sorted_zips)}
                         _max_c = max(count_map.values()) or 1
                         _min_c = min(count_map.values())
                         _rng = max(_max_c - _min_c, 1.0)
                         for f in map_data.get("features", []):
                             z = str(f.get("properties", {}).get("ZIP", ""))
                             if z in count_map:
+                                f["properties"]["count"] = int(count_map[z])
+                                f["properties"]["rank"] = rank_map[z]
                                 f["properties"]["fill_opacity"] = round(
                                     0.12 + 0.60 * (count_map[z] - _min_c) / _rng, 2
                                 )
-                                f["properties"]["count"] = int(count_map[z])
-                        map_data.setdefault("properties", {})["heat_fill"] = True
+                        if len(count_map) == 1:
+                            # Single result: blue ZIP boundary styling, no red color override
+                            map_data.setdefault("properties", {})["boundary_type"] = "zip"
+                            for _f in map_data.get("features", []):
+                                _f.get("properties", {}).pop("_color", None)
+                        else:
+                            map_data.setdefault("properties", {})["heat_fill"] = True
+                    # Build a data-driven answer whenever Genie returned actual rows
+                    # (overrides clarifying-question text that Genie sometimes emits)
+                    if all_zips and count_map:
+                        top_zip = max(count_map, key=count_map.get)
+                        top_count = int(count_map[top_zip])
+                        city_info = ""
+                        if map_data:
+                            for _f in map_data.get("features", []):
+                                if str(_f.get("properties", {}).get("ZIP", "")) == top_zip:
+                                    po = _f.get("properties", {}).get("PO_NAME", "")
+                                    st = _f.get("properties", {}).get("STATE", "")
+                                    if po and st:
+                                        city_info = f" ({po}, {st})"
+                                    break
+                        if len(all_zips) == 1:
+                            answer = (
+                                f"ZIP code {top_zip}{city_info} has the most deliveries "
+                                f"with {top_count:,} delivery points."
+                            )
+                        else:
+                            answer = (
+                                f"The top ZIP code is {top_zip}{city_info} with "
+                                f"{top_count:,} delivery points. "
+                                f"Showing {len(all_zips)} ZIP codes on the map."
+                            )
         return GeoResponse(answer=answer, map_data=map_data, sources=["genie-space"])
 
 
@@ -2142,6 +2540,28 @@ class GISAgent:
 
     def __init__(self):
         self._real_agent = RealAgent()
+
+    async def load_zip_browse_batch(
+        self,
+        city: str,
+        state: str,
+        center_lat: Optional[float] = None,
+        center_lon: Optional[float] = None,
+        limit: int = 30,
+        loaded_zips: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self._real_agent._load_zip_browse_batch(
+                city=city,
+                state=state,
+                center_lat=center_lat,
+                center_lon=center_lon,
+                limit=limit,
+                loaded_zips=loaded_zips,
+            ),
+        )
 
     async def handle(self, question: str, context=None, history=None) -> GeoResponse:
         loop = asyncio.get_event_loop()
@@ -2311,6 +2731,12 @@ class GISAgent:
             # Catches prompts like "top 5 zips in Chicago by collection box count".
             if _is_zip_ranking(question):
                 return _INTENT_HANDLERS["zip_ranking"](ra, question, {}, history_list)
+
+            # ── Deterministic ZIP browse pre-check ────────────────────────────────
+            # Catches prompts like "show me the ZIP codes for Washington, DC" and
+            # returns a lazy-loading ZIP boundary response instead of a text-only Genie answer.
+            if _ZIP_BROWSE_RE.search(question) and not _ZIP_PRESENT_RE.search(question):
+                return _INTENT_HANDLERS["zip_browse"](ra, question, {}, history_list)
 
             # ── Deterministic zip_count / spatial_lookup pre-checks ──────────────
             # Fires when a 5-digit ZIP is present and a layer keyword is present.
