@@ -2247,6 +2247,31 @@ class RealAgent:
         except Exception:
             return None
 
+    @staticmethod
+    def _convert_wm_geometry_py(geom_raw: str) -> Optional[Dict]:
+        """Convert a web-mercator ring JSON string to a WGS-84 GeoJSON geometry dict.
+        Pure Python — no Spark / cluster call needed.
+        Handles both flat [ring, …] and polygon-wrapped [[ring, …], …] structures."""
+        import math
+        def _wm2ll(x: float, y: float) -> list:
+            lon = (x / 20037508.34) * 180.0
+            lat = (y / 20037508.34) * 180.0
+            lat = 180.0 / math.pi * (2.0 * math.atan(math.exp(lat * math.pi / 180.0)) - math.pi / 2.0)
+            return [round(lon, 6), round(lat, 6)]
+        try:
+            rings = json.loads(geom_raw) if isinstance(geom_raw, str) else geom_raw
+            if not rings:
+                return None
+            flat = rings if isinstance(rings[0][0][0], (int, float)) else [r for poly in rings for r in poly]
+            converted = [[_wm2ll(pt[0], pt[1]) for pt in ring] for ring in flat if ring]
+            if not converted:
+                return None
+            if len(converted) == 1:
+                return {"type": "Polygon", "coordinates": converted}
+            return {"type": "MultiPolygon", "coordinates": [[r] for r in converted]}
+        except Exception:
+            return None
+
     def _handle_box_analytic(self, question: str) -> Optional[GeoResponse]:
         """Direct-SQL handler for collection box analytics (cpms_co_t).
         Covers state/city/national counts, type breakdowns, and general box lookups
@@ -2452,14 +2477,50 @@ class RealAgent:
                                 except (ValueError, TypeError):
                                     pass
                 if all_zips:
-                                        # Cap displayed ZIPs to top 50 by count to keep map responsive
+                    # Cap displayed ZIPs to top 50 by count to keep map responsive
                     if len(all_zips) > 50:
                         _top_zips = sorted(count_map, key=count_map.get, reverse=True)[:50]
                         _top_set  = set(_top_zips)
                         all_zips  = _top_zips
                         count_map = {z: v for z, v in count_map.items() if z in _top_set}
                         color_map = {z: v for z, v in color_map.items() if z in _top_set}
-                    map_data = self._fetch_zip_boundaries_for_map(all_zips, color_map)
+                    # ── Inline geometry: use whatever Genie already returned ──────
+                    # Avoids a second cluster round-trip when Genie included geometry.
+                    # Priority: (a) GEOMETRY rings → polygons  (b) lat/lon → points
+                    # Fallback: _fetch_zip_boundaries_for_map (separate cluster call)
+                    _geom_ci  = next((i for i, c in enumerate(col_lower) if c == "geometry"), None)
+                    _lat_ci   = next((i for i, c in enumerate(col_lower) if c in ("latitude","lat","dfp_lat","dpf_lat")), None)
+                    _lon_ci   = next((i for i, c in enumerate(col_lower) if c in ("longitude","lon","lng","dfp_lon","dpf_lon")), None)
+                    _top_set  = set(all_zips)
+                    if _geom_ci is not None or (_lat_ci is not None and _lon_ci is not None):
+                        _feats: list = []
+                        for _row in rows:
+                            _zv = str(_row[zip_col_idxs[0]]) if _row[zip_col_idxs[0]] else ""
+                            if _zv not in _top_set:
+                                continue
+                            _props: Dict[str, Any] = {"ZIP": _zv}
+                            for _ec in ("PO_NAME", "STATE", "DETAIL_ZIP_CODE"):
+                                _ei = next((i for i, c in enumerate(columns) if c.upper() == _ec), None)
+                                if _ei is not None and _row[_ei] is not None:
+                                    _props[_ec] = _row[_ei]
+                            # Polygon from ring geometry
+                            if _geom_ci is not None and _row[_geom_ci]:
+                                _geom = RealAgent._convert_wm_geometry_py(_row[_geom_ci])
+                                if _geom:
+                                    _feats.append({"type": "Feature", "geometry": _geom, "properties": dict(_props)})
+                            # Point from lat/lon (centroid marker or individual point)
+                            if _lat_ci is not None and _lon_ci is not None:
+                                try:
+                                    _lat, _lon = float(_row[_lat_ci]), float(_row[_lon_ci])
+                                    if -90 <= _lat <= 90 and -180 <= _lon <= 180 and (_lat, _lon) != (0.0, 0.0):
+                                        _feats.append({"type": "Feature",
+                                                       "geometry": {"type": "Point", "coordinates": [round(_lon, 6), round(_lat, 6)]},
+                                                       "properties": dict(_props)})
+                                except (TypeError, ValueError):
+                                    pass
+                        map_data = {"type": "FeatureCollection", "features": _feats} if _feats else None
+                    if map_data is None:
+                        map_data = self._fetch_zip_boundaries_for_map(all_zips, color_map)
                     # Stamp count onto every feature regardless of how many ZIPs
                     if map_data and count_map:
                         sorted_zips = sorted(count_map, key=count_map.get, reverse=True)
