@@ -889,6 +889,46 @@ class RealAgent:
         except Exception:
             return GeoResponse(answer=f"Geocode raw output: {str(data)[:1000]}", map_data=None, sources=["debug"])
 
+    def _resolve_locations_via_genie(self, *location_names: str) -> list:
+        """Resolve one or more location names to lat/lon via Genie (facilities_fc lookup).
+
+        Single Genie call for all locations.  Returns a list of dicts
+        {lat, lon, name} in input order — None for any that didn't match a USPS facility.
+        Falls back gracefully so callers can always use Geocode when None is returned.
+        """
+        if not location_names:
+            return []
+        loc_list = "\n".join(f"{i + 1}. {loc}" for i, loc in enumerate(location_names))
+        q = (
+            "Look up the following locations in the USPS facilities table (facilities_fc). "
+            "For each, return LOCALE_NAME, LATITUDE, and LONGITUDE. "
+            "Return exactly one row per location in the same order listed:\n" + loc_list
+        )
+        result = self._query_genie(q)
+        rows = result.get("rows", [])
+        cols = result.get("columns", [])
+        if not rows or not cols:
+            return [None] * len(location_names)
+        col_lower = [c.lower() for c in cols]
+        lat_idx  = next((i for i, c in enumerate(col_lower) if "lat" in c), None)
+        lon_idx  = next((i for i, c in enumerate(col_lower) if "lon" in c), None)
+        name_idx = next((i for i, c in enumerate(col_lower) if "locale" in c or "name" in c), None)
+        resolved = []
+        for i, loc in enumerate(location_names):
+            row = rows[i] if i < len(rows) else None
+            if row and lat_idx is not None and lon_idx is not None:
+                try:
+                    lat = float(row[lat_idx])
+                    lon = float(row[lon_idx])
+                    if lat and lon and -90 <= lat <= 90 and -180 <= lon <= 180:
+                        name = (row[name_idx] if name_idx is not None else None) or loc
+                        resolved.append({"lat": lat, "lon": lon, "name": name})
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            resolved.append(None)
+        return resolved
+
     def _extract_route_locations(self, question: str, intent_data: Dict[str, Any] = None):
         d = intent_data or {}
         origin = (d.get("origin") or "").strip()
@@ -922,59 +962,115 @@ class RealAgent:
                 sources=["geoanalytics-engine"],
             )
 
-        code = _build_code(
-            _SPARK_SETUP,
-            _GA_SETUP,
-            "import json",
-            "from geoanalytics.tools import Geocode, CreateRoutes",
-            "from geoanalytics.sql import functions as ga_fn",
-            "from pyspark.sql import functions as F",
-            "from pyspark.sql import Row",
-            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
-            f"network_path = {json.dumps(_GA_NETWORK_PATH)}",
-            f"addresses_df = spark.createDataFrame([({json.dumps(origin)},), ({json.dumps(dest)},)], ['address'])",
-            "try:",
-            "    geocoded = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal').run(addresses_df)",
-            "    rows = geocoded.select('address', 'geocode_location', 'Score', 'Status', 'Match_addr').collect()",
-            "    matched = [row for row in rows if row.geocode_location and row.Status in ('M', 'T')]",
-            "    if len(matched) < 2:",
-            "        statuses = [{'address': row['address'], 'status': row['Status'], 'match': row['Match_addr']} for row in rows]",
-            "        print(json.dumps({'error': f'Could not geocode both addresses — got {len(matched)} usable match(es).', 'geocode_results': statuses}))",
-            "    else:",
-            f"        route_df = spark.createDataFrame([Row(RouteName={json.dumps(origin + ' to ' + dest)})])",
-            "        o_loc = matched[0]['geocode_location']",
-            "        d_loc = matched[1]['geocode_location']",
-            "        route_df = route_df.withColumn('Stop_1', ga_fn.point(o_loc.x, o_loc.y))",
-            "        route_df = route_df.withColumn('Stop_2', ga_fn.point(d_loc.x, d_loc.y))",
-            "        rt = CreateRoutes()",
-            "        rt.setNetwork(network_path)",
-            "        rt.setStops('Stop_1', 'Stop_2')",
-            "        rt.setTravelMode('Driving Time')",
-            "        rt.setRouteGeometry('along_network')",
-            "        result = rt.run(route_df)",
-            "        row = result.withColumn('route_wkt', ga_fn.as_text('route_geometry')).withColumn('route_geojson', F.expr('ST_AsGeoJSON(ST_GeomFromWKT(route_wkt))')).first()",
-            f"        origin_match = matched[0]['Match_addr'] or {json.dumps(origin)}",
-            f"        destination_match = matched[1]['Match_addr'] or {json.dumps(dest)}",
-            "        if row and row['route_geojson']:",
-            "            geom = json.loads(row['route_geojson'])",
-            "            # Reduce vertex count so output stays under API limit",
-            "            if geom.get('type') == 'LineString':",
-            "                _c = geom['coordinates']; _step = max(1, len(_c)//500)",
-            "                _s = [[round(p[0],5),round(p[1],5)] for p in _c[::_step]]",
-            "                if _c and _s[-1] != [round(_c[-1][0],5),round(_c[-1][1],5)]: _s.append([round(_c[-1][0],5),round(_c[-1][1],5)])",
-            "                geom['coordinates'] = _s",
-            "            travel_time_min = round(float(row['travel_time']), 1) if row['travel_time'] is not None else None",
-            "            travel_distance_mi = round(float(row['travel_distance']) / 1609.34, 2) if row['travel_distance'] is not None else None",
-            f"            route_name = {json.dumps(origin + ' to ' + dest)}",
-            "            features = [{'type': 'Feature', 'geometry': geom, 'properties': {'route': route_name, 'origin_match': origin_match, 'destination_match': destination_match, 'travel_time_min': travel_time_min, 'travel_distance_mi': travel_distance_mi}}]",
-            "            print(json.dumps({'type': 'FeatureCollection', 'features': features, 'travel_time_min': travel_time_min, 'travel_distance_mi': travel_distance_mi, 'origin_match': origin_match, 'destination_match': destination_match}))",
-            "        else:",
-            f"            route_name = {json.dumps(origin + ' to ' + dest)}",
-            "            features = [{'type': 'Feature', 'geometry': {'type': 'LineString', 'coordinates': [[o_loc.x, o_loc.y], [d_loc.x, d_loc.y]]}, 'properties': {'route': route_name, 'origin_match': origin_match, 'destination_match': destination_match, 'note': 'straight-line estimate'}}]",
-            "            print(json.dumps({'type': 'FeatureCollection', 'features': features, 'origin_match': origin_match, 'destination_match': destination_match}))",
-            "except Exception as e:",
-            "    print(json.dumps({'error': str(e)}))",
-        )
+        # ── Step 1: try Genie for facility-name resolution ────────────────────
+        # Genie fuzzy-matches USPS facility names far better than a LIKE query
+        # or the street-address geocoder.  If both locations resolve, we skip
+        # the cluster Geocode call entirely and pass known coords to CreateRoutes.
+        resolved = self._resolve_locations_via_genie(origin, dest)
+        o_res, d_res = resolved[0], resolved[1]
+
+        if o_res and d_res:
+            # Both are known USPS facilities — build CreateRoutes code directly
+            o_lat, o_lon, o_name = o_res["lat"], o_res["lon"], o_res["name"]
+            d_lat, d_lon, d_name = d_res["lat"], d_res["lon"], d_res["name"]
+            route_name = f"{o_name} to {d_name}"
+            code = _build_code(
+                _SPARK_SETUP,
+                _GA_SETUP,
+                "import json",
+                "from geoanalytics.tools import CreateRoutes",
+                "from geoanalytics.sql import functions as ga_fn",
+                "from pyspark.sql import functions as F",
+                "from pyspark.sql import Row",
+                f"network_path = {json.dumps(_GA_NETWORK_PATH)}",
+                f"origin_match = {json.dumps(o_name)}",
+                f"destination_match = {json.dumps(d_name)}",
+                f"route_df = spark.createDataFrame([Row(RouteName={json.dumps(route_name)})])",
+                f"route_df = route_df.withColumn('Stop_1', ga_fn.point({o_lon}, {o_lat}))",
+                f"route_df = route_df.withColumn('Stop_2', ga_fn.point({d_lon}, {d_lat}))",
+                "rt = CreateRoutes()",
+                "rt.setNetwork(network_path)",
+                "rt.setStops('Stop_1', 'Stop_2')",
+                "rt.setTravelMode('Driving Time')",
+                "rt.setRouteGeometry('along_network')",
+                "try:",
+                "    result = rt.run(route_df)",
+                "    row = result.withColumn('route_wkt', ga_fn.as_text('route_geometry')).withColumn('route_geojson', F.expr('ST_AsGeoJSON(ST_GeomFromWKT(route_wkt))')).first()",
+                "    if row and row['route_geojson']:",
+                "        geom = json.loads(row['route_geojson'])",
+                "        if geom.get('type') == 'LineString':",
+                "            _c = geom['coordinates']; _step = max(1, len(_c)//500)",
+                "            _s = [[round(p[0],5),round(p[1],5)] for p in _c[::_step]]",
+                "            if _c and _s[-1] != [round(_c[-1][0],5),round(_c[-1][1],5)]: _s.append([round(_c[-1][0],5),round(_c[-1][1],5)])",
+                "            geom['coordinates'] = _s",
+                "        travel_time_min = round(float(row['travel_time']), 1) if row['travel_time'] is not None else None",
+                "        travel_distance_mi = round(float(row['travel_distance']) / 1609.34, 2) if row['travel_distance'] is not None else None",
+                f"        features = [{{'type': 'Feature', 'geometry': geom, 'properties': {{'route': {json.dumps(route_name)}, 'origin_match': origin_match, 'destination_match': destination_match, 'travel_time_min': travel_time_min, 'travel_distance_mi': travel_distance_mi}}}}]",
+                "        print(json.dumps({'type': 'FeatureCollection', 'features': features, 'travel_time_min': travel_time_min, 'travel_distance_mi': travel_distance_mi, 'origin_match': origin_match, 'destination_match': destination_match}))",
+                "    else:",
+                f"        features = [{{'type': 'Feature', 'geometry': {{'type': 'LineString', 'coordinates': [[{o_lon}, {o_lat}], [{d_lon}, {d_lat}]]}}, 'properties': {{'route': {json.dumps(route_name)}, 'origin_match': origin_match, 'destination_match': destination_match, 'note': 'straight-line estimate'}}}}]",
+                "        print(json.dumps({'type': 'FeatureCollection', 'features': features, 'origin_match': origin_match, 'destination_match': destination_match}))",
+                "except Exception as e:",
+                "    print(json.dumps({'error': str(e)}))",
+            )
+        else:
+            # ── Step 2: Geocode fallback for non-facility / street addresses ──
+            # One or both locations are not USPS facilities — use the full
+            # Geocode + CreateRoutes cluster path (original behavior).
+            code = _build_code(
+                _SPARK_SETUP,
+                _GA_SETUP,
+                "import json",
+                "from geoanalytics.tools import Geocode, CreateRoutes",
+                "from geoanalytics.sql import functions as ga_fn",
+                "from pyspark.sql import functions as F",
+                "from pyspark.sql import Row",
+                f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
+                f"network_path = {json.dumps(_GA_NETWORK_PATH)}",
+                f"addresses_df = spark.createDataFrame([({json.dumps(origin)},), ({json.dumps(dest)},)], ['address'])",
+                "try:",
+                "    geocoded = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal').run(addresses_df)",
+                "    rows = geocoded.select('address', 'geocode_location', 'Score', 'Status', 'Match_addr').collect()",
+                "    matched = [row for row in rows if row.geocode_location and row.Status in ('M', 'T')]",
+                "    if len(matched) < 2:",
+                "        statuses = [{'address': row['address'], 'status': row['Status'], 'match': row['Match_addr']} for row in rows]",
+                "        print(json.dumps({'error': f'Could not geocode both addresses — got {len(matched)} usable match(es).', 'geocode_results': statuses}))",
+                "    else:",
+                f"        route_df = spark.createDataFrame([Row(RouteName={json.dumps(origin + ' to ' + dest)})])",
+                "        o_loc = matched[0]['geocode_location']",
+                "        d_loc = matched[1]['geocode_location']",
+                "        route_df = route_df.withColumn('Stop_1', ga_fn.point(o_loc.x, o_loc.y))",
+                "        route_df = route_df.withColumn('Stop_2', ga_fn.point(d_loc.x, d_loc.y))",
+                "        rt = CreateRoutes()",
+                "        rt.setNetwork(network_path)",
+                "        rt.setStops('Stop_1', 'Stop_2')",
+                "        rt.setTravelMode('Driving Time')",
+                "        rt.setRouteGeometry('along_network')",
+                "        result = rt.run(route_df)",
+                "        row = result.withColumn('route_wkt', ga_fn.as_text('route_geometry')).withColumn('route_geojson', F.expr('ST_AsGeoJSON(ST_GeomFromWKT(route_wkt))')).first()",
+                f"        origin_match = matched[0]['Match_addr'] or {json.dumps(origin)}",
+                f"        destination_match = matched[1]['Match_addr'] or {json.dumps(dest)}",
+                "        if row and row['route_geojson']:",
+                "            geom = json.loads(row['route_geojson'])",
+                "            if geom.get('type') == 'LineString':",
+                "                _c = geom['coordinates']; _step = max(1, len(_c)//500)",
+                "                _s = [[round(p[0],5),round(p[1],5)] for p in _c[::_step]]",
+                "                if _c and _s[-1] != [round(_c[-1][0],5),round(_c[-1][1],5)]: _s.append([round(_c[-1][0],5),round(_c[-1][1],5)])",
+                "                geom['coordinates'] = _s",
+                "            travel_time_min = round(float(row['travel_time']), 1) if row['travel_time'] is not None else None",
+                "            travel_distance_mi = round(float(row['travel_distance']) / 1609.34, 2) if row['travel_distance'] is not None else None",
+                f"            route_name = {json.dumps(origin + ' to ' + dest)}",
+                "            features = [{'type': 'Feature', 'geometry': geom, 'properties': {'route': route_name, 'origin_match': origin_match, 'destination_match': destination_match, 'travel_time_min': travel_time_min, 'travel_distance_mi': travel_distance_mi}}]",
+                "            print(json.dumps({'type': 'FeatureCollection', 'features': features, 'travel_time_min': travel_time_min, 'travel_distance_mi': travel_distance_mi, 'origin_match': origin_match, 'destination_match': destination_match}))",
+                "        else:",
+                f"            route_name = {json.dumps(origin + ' to ' + dest)}",
+                "            features = [{'type': 'Feature', 'geometry': {'type': 'LineString', 'coordinates': [[o_loc.x, o_loc.y], [d_loc.x, d_loc.y]]}, 'properties': {'route': route_name, 'origin_match': origin_match, 'destination_match': destination_match, 'note': 'straight-line estimate'}}]",
+                "            print(json.dumps({'type': 'FeatureCollection', 'features': features, 'origin_match': origin_match, 'destination_match': destination_match}))",
+                "except Exception as e:",
+                "    print(json.dumps({'error': str(e)}))",
+            )
+
+        # ── Response parsing (shared by both paths) ───────────────────────────
         data, error = self._run_cluster_code(code)
         if error:
             return GeoResponse(answer=f"Route error: {error}", map_data=None, sources=["geoanalytics-engine"])
@@ -983,21 +1079,20 @@ class RealAgent:
             if isinstance(parsed, dict) and "error" in parsed:
                 return GeoResponse(answer=f"Route error: {parsed['error']}", map_data=None, sources=["geoanalytics-engine"])
             display_origin = parsed.get("origin_match") or origin
-            display_dest = parsed.get("destination_match") or dest
-            travel_time = parsed.get("travel_time_min")
+            display_dest   = parsed.get("destination_match") or dest
+            travel_time    = parsed.get("travel_time_min")
             travel_distance = parsed.get("travel_distance_mi")
             route_steps = [
                 f"Start at {display_origin}.",
                 f"Drive to {display_dest}.",
                 f"Estimated travel time: {travel_time} minutes." if travel_time is not None else None,
                 f"Estimated travel distance: {travel_distance} miles." if travel_distance is not None else None,
-                "Map shows the computed driving route. Detailed turn-by-turn maneuvers are not available from the current route output."
+                "Map shows the computed driving route. Detailed turn-by-turn maneuvers are not available from the current route output.",
             ]
             answer = "\n".join(step for step in route_steps if step)
             return GeoResponse(answer=answer, map_data=parsed, sources=["geoanalytics-engine"])
         except Exception:
             return GeoResponse(answer=f"Route raw output: {str(data)[:1000]}", map_data=None, sources=["debug"])
-
     def _handle_service_area(self, question: str, intent_data: Dict[str, Any] = None, history: Optional[List[Dict[str, str]]] = None) -> GeoResponse:
         d = intent_data or {}
         zip_code = d.get("zip_code")
