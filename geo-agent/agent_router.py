@@ -22,12 +22,6 @@ _TBL_ZIP5 = os.environ.get("TBL_ZIP5", "edlprod.geo_analytics.usps_zip5")
 _TBL_FACILITIES = os.environ.get("TBL_FACILITIES", "edlprod.geo_analytics.facilities_fc")
 _TBL_BOXES = os.environ.get("TBL_BOXES", "edlprod.geo_analytics.cpms_co_t")
 
-# Single Genie space — CPMS collection boxes only
-_CPMS_GENIE_SPACE = (
-    os.environ.get("GENIE_SPACE_CPMS")
-    or os.environ.get("GENIE_SPACE_ID")
-    or "01f164dda12514ad8940be29a049870c"
-)
 _FACILITIES_GENIE_SPACE = (
     os.environ.get("GENIE_SPACE_FACILITIES")
     or "01f16b0f00271be69d67170685241974"
@@ -655,9 +649,10 @@ weather_alerts → show active NWS weather alerts for a state or nationwide
                  params: {"state": "<2-letter abbr or null>"}
 weather_containment → find facilities/boxes within active weather alert polygons
                  params: {"layer": "facilities|boxes", "state": "<2-letter abbr or null>"}
-genie          → everything else: collection box counts, facility counts, operational stats, box types,
-                 installation/removal dates, coverage by district/city/state, address lookups — any SQL
-                 question about USPS collection box or facility data the map tools above cannot handle
+genie          → analytical questions: delivery point counts/rankings by ZIP/city/state, collection box
+                 counts/types by location, facility counts and characteristics, coverage statistics,
+                 any SQL question that needs data from ams_delivery_point_t, cpms_co_t, facilities_fc,
+                 or facility_network — use when the answer is a number, ranking, or breakdown
                  params: {}
 
 LAYER RULES:
@@ -2261,6 +2256,18 @@ class RealAgent:
         _box_kw = ("box", "boxes", "collection", "cpms", "blue box")
         if not any(w in q for w in _box_kw):
             return None
+        # Pure analytics/count questions are handled better by Genie (has cpms_co_t).
+        # Only intercept when the user wants map points (show/find/display/where).
+        _map_intents = re.compile(
+            r"\b(show|display|map|plot|find|where|list|locate|near|closest|nearest)\b",
+            re.IGNORECASE,
+        )
+        _count_only = re.compile(
+            r"\b(how many|count|total|number of|breakdown|by type|types? of|how are)\b",
+            re.IGNORECASE,
+        )
+        if _count_only.search(question) and not _map_intents.search(question):
+            return None  # Let Genie answer analytics/count questions directly
 
         # ── location extraction ─────────────────────────────────────────
         zip_m = re.search(r"\b(\d{5})\b", question)
@@ -2410,30 +2417,7 @@ class RealAgent:
         if box_result is not None:
             return box_result
 
-        # Normalise delivery-related terminology before sending to Genie.
-        # The word "deliveries" makes Genie think events-over-time and ask
-        # for a time period; "delivery points" maps directly to the DPF table.
-        _dpf_kw = re.compile(
-            r"\b(deliveries|delivery(?!\s+point))\b", re.IGNORECASE
-        )
-        genie_question = _dpf_kw.sub(
-            lambda m: "delivery points" if m.group().lower() in ("deliveries", "delivery") else m.group(),
-            question,
-        )
-        result = self._query_genie(genie_question)
-        # If Genie returned only clarifying text (no SQL ran), retry once with
-        # an explicit instruction to return the count and zip code.
-        if not result.get("rows") and result.get("answer"):
-            _clarif = re.compile(
-                r"\b(prefer|instead|specify|time period|date range|clarify|which table|more specific)\b",
-                re.IGNORECASE,
-            )
-            if _clarif.search(result["answer"]):
-                retry_q = (
-                    genie_question.rstrip("?. ")
-                    + " — please run the query now and return the zip code and delivery point count."
-                )
-                result = self._query_genie(retry_q)
+        result = self._query_genie(question)
         answer = result.get("answer", "No answer returned")
         rows = result.get("rows", [])
         columns = result.get("columns", [])
@@ -2468,6 +2452,13 @@ class RealAgent:
                                 except (ValueError, TypeError):
                                     pass
                 if all_zips:
+                                        # Cap displayed ZIPs to top 50 by count to keep map responsive
+                    if len(all_zips) > 50:
+                        _top_zips = sorted(count_map, key=count_map.get, reverse=True)[:50]
+                        _top_set  = set(_top_zips)
+                        all_zips  = _top_zips
+                        count_map = {z: v for z, v in count_map.items() if z in _top_set}
+                        color_map = {z: v for z, v in color_map.items() if z in _top_set}
                     map_data = self._fetch_zip_boundaries_for_map(all_zips, color_map)
                     # Stamp count onto every feature regardless of how many ZIPs
                     if map_data and count_map:
@@ -2491,8 +2482,6 @@ class RealAgent:
                                 _f.get("properties", {}).pop("_color", None)
                         else:
                             map_data.setdefault("properties", {})["heat_fill"] = True
-                    # Build a data-driven answer whenever Genie returned actual rows
-                    # (overrides clarifying-question text that Genie sometimes emits)
                     if all_zips and count_map:
                         top_zip = max(count_map, key=count_map.get)
                         top_count = int(count_map[top_zip])
@@ -2585,6 +2574,37 @@ class GISAgent:
 
         def _run():
             q_lower = question.lower()
+
+            # ── Meta: "what tables / data do you have access to" ───────────────
+            _META_TABLE_RE = re.compile(
+                r"(what tables?|which tables?|what data|what (do you|can you)"
+                r"|data sources?|access to|capabilities|what('s| is) available)",
+                re.IGNORECASE,
+            )
+            if _META_TABLE_RE.search(question):
+                _tbl_answer = (
+                    "I have access to the following tables in edlprod.geo_analytics:\n\n"
+                    "Via Genie (analytics & counts):\n"
+                    "  1. ams_delivery_point_t \u2014 delivery points (ZIP, lat/lon, type, vacancy)\n"
+                    "  2. facilities_fc \u2014 USPS facilities (name, type, address, lat/lon)\n"
+                    "  3. cpms_co_t \u2014 collection boxes (box number, address, type, lat/lon)\n"
+                    "  4. usps_zip5 \u2014 ZIP code boundaries (ZIP, city, state, geometry)\n"
+                    "  5. facility_network \u2014 network facilities (RPDC, SDC, LPC, etc.)\n\n"
+                    "Via direct SQL (boundaries & spatial lookups):\n"
+                    "  6. gis1_states \u2014 state boundaries\n"
+                    "  7. gis1_counties \u2014 county boundaries\n"
+                    "  8. gis1_district \u2014 USPS district boundaries (with area/region hierarchy)\n"
+                    "  9. gis1_zip3 \u2014 ZIP3 area boundaries\n"
+                    " 10. gis1_logistics_divisions \u2014 logistics division boundaries\n"
+                    " 11. gis1_logistics_regions \u2014 logistics region boundaries\n"
+                    " 12. gis1_processing_divisions \u2014 processing division boundaries\n"
+                    " 13. gis1_processing_regions \u2014 processing region boundaries\n"
+                    " 14. gis1_congressional_districts \u2014 congressional district boundaries\n"
+                    " 15. gis1_retail_delivery_areas \u2014 retail delivery area boundaries\n"
+                    " 16. gis1_facilities_boundaries \u2014 individual facility footprint polygons\n"
+                    " 17. gis1_route_bndy \u2014 delivery route boundaries"
+                )
+                return GeoResponse(answer=_tbl_answer, map_data=None, sources=["geo_analytics"])
 
             # ── Deterministic SA-containment pre-check ──────────────────────────
             # Catches follow-up questions like "what facilities are within the 5 min
