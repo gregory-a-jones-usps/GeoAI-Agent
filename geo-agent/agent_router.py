@@ -22,12 +22,6 @@ _TBL_ZIP5 = os.environ.get("TBL_ZIP5", "edlprod.geo_analytics.usps_zip5")
 _TBL_FACILITIES = os.environ.get("TBL_FACILITIES", "edlprod.geo_analytics.facilities_fc")
 _TBL_BOXES = os.environ.get("TBL_BOXES", "edlprod.geo_analytics.cpms_co_t")
 
-# Single Genie space — CPMS collection boxes only
-_CPMS_GENIE_SPACE = (
-    os.environ.get("GENIE_SPACE_CPMS")
-    or os.environ.get("GENIE_SPACE_ID")
-    or "01f164dda12514ad8940be29a049870c"
-)
 _FACILITIES_GENIE_SPACE = (
     os.environ.get("GENIE_SPACE_FACILITIES")
     or "01f16b0f00271be69d67170685241974"
@@ -197,6 +191,8 @@ _WEATHER_KW = [
     "severe thunderstorm", "fire weather", "high wind", "heat advisory",
 ]
 _ALL_LAYER_WORDS = _LAYER_KW + ["nearest", "closest", "drive time", "service area", "route", "geocode", "directions"]
+
+_RAW_COORD_RE = re.compile(r'^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$')
 
 _STATE_ABBRS = {
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA",
@@ -655,9 +651,10 @@ weather_alerts → show active NWS weather alerts for a state or nationwide
                  params: {"state": "<2-letter abbr or null>"}
 weather_containment → find facilities/boxes within active weather alert polygons
                  params: {"layer": "facilities|boxes", "state": "<2-letter abbr or null>"}
-genie          → everything else: collection box counts, facility counts, operational stats, box types,
-                 installation/removal dates, coverage by district/city/state, address lookups — any SQL
-                 question about USPS collection box or facility data the map tools above cannot handle
+genie          → analytical questions: delivery point counts/rankings by ZIP/city/state, collection box
+                 counts/types by location, facility counts and characteristics, coverage statistics,
+                 any SQL question that needs data from ams_delivery_point_t, cpms_co_t, facilities_fc,
+                 or facility_network — use when the answer is a number, ranking, or breakdown
                  params: {}
 
 LAYER RULES:
@@ -894,6 +891,106 @@ class RealAgent:
         except Exception:
             return GeoResponse(answer=f"Geocode raw output: {str(data)[:1000]}", map_data=None, sources=["debug"])
 
+    def _resolve_locations_via_genie(self, *location_names: str) -> list:
+        """Resolve one or more location names to lat/lon.
+
+        Pre-screens for raw 'lat, lon' strings first (no API call needed).
+        For the rest, asks Genie to look up facilities_fc in one batch call.
+        Returns [{lat, lon, name}] in input order — None for any unresolved.
+        Callers should geocode None entries via _geocode_addresses().
+        """
+        if not location_names:
+            return []
+
+        # Pre-screen: raw coordinate strings don't need Genie or geocoding
+        pre = []
+        for loc in location_names:
+            m = _RAW_COORD_RE.match(loc.strip())
+            if m:
+                lat, lon = float(m.group(1)), float(m.group(2))
+                if -90 <= lat <= 90 and -180 <= lon <= 180:
+                    pre.append({"lat": lat, "lon": lon, "name": f"{lat},{lon}", "source": "coords"})
+                    continue
+            pre.append(None)
+
+        # If all were raw coords, skip Genie entirely
+        genie_idxs = [i for i, r in enumerate(pre) if r is None]
+        if not genie_idxs:
+            return pre
+
+        genie_locs = [location_names[i] for i in genie_idxs]
+        loc_list = "\n".join(f"{i + 1}. {loc}" for i, loc in enumerate(genie_locs))
+        q = (
+            "Look up the following locations in the USPS facilities table (facilities_fc). "
+            "For each, return LOCALE_NAME, LATITUDE, and LONGITUDE. "
+            "Return exactly one row per location in the same order listed:\n" + loc_list
+        )
+        result = self._query_genie(q)
+        rows = result.get("rows", [])
+        cols = result.get("columns", [])
+        if not rows or not cols:
+            return pre  # all Genie lookups failed; raw coords still valid
+        col_lower = [c.lower() for c in cols]
+        lat_idx  = next((i for i, c in enumerate(col_lower) if "lat" in c), None)
+        lon_idx  = next((i for i, c in enumerate(col_lower) if "lon" in c), None)
+        name_idx = next((i for i, c in enumerate(col_lower) if "locale" in c or "name" in c), None)
+        for j, orig_idx in enumerate(genie_idxs):
+            row = rows[j] if j < len(rows) else None
+            loc = genie_locs[j]
+            if row and lat_idx is not None and lon_idx is not None:
+                try:
+                    lat = float(row[lat_idx])
+                    lon = float(row[lon_idx])
+                    if lat and lon and -90 <= lat <= 90 and -180 <= lon <= 180:
+                        name = (row[name_idx] if name_idx is not None else None) or loc
+                        pre[orig_idx] = {"lat": lat, "lon": lon, "name": name, "source": "genie"}
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            # pre[orig_idx] stays None — caller will geocode it
+        return pre
+
+
+    def _geocode_addresses(self, addresses: list) -> list:
+        """Geocode a list of free-text address strings on the GIS-GAE cluster.
+
+        Returns a list of {lat, lon, name, source='geocode'} dicts (or None for
+        any address that failed to match) in the same order as the input.
+        """
+        if not addresses:
+            return []
+        geocode_code = _build_code(
+            _SPARK_SETUP, _GA_SETUP,
+            "import json",
+            "from geoanalytics.tools import Geocode",
+            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
+            f"_addrs = {json.dumps(addresses)}",
+            "addr_df = spark.createDataFrame([(a,) for a in _addrs], ['address'])",
+            "try:",
+            "    gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal')",
+            "    geocoded = gc.run(addr_df)",
+            "    rows = geocoded.select('address', 'geocode_location', 'Status', 'Match_addr').collect()",
+            "    result = []",
+            "    for r in rows:",
+            "        if r.geocode_location and r.Status in ('M', 'T'):",
+            "            result.append({'lat': float(r.geocode_location.y), 'lon': float(r.geocode_location.x),",
+            "                           'name': r.Match_addr or r.address, 'source': 'geocode'})",
+            "        else:",
+            "            result.append(None)",
+            "    print(json.dumps(result))",
+            "except Exception as e:",
+            f"    print(json.dumps([None] * {len(addresses)}))",
+        )
+        data, error = self._run_cluster_code(geocode_code)
+        if error:
+            return [None] * len(addresses)
+        try:
+            out = json.loads(data)
+            return [item if (isinstance(item, dict) and item.get("lat") and item.get("lon")) else None
+                    for item in out]
+        except Exception:
+            return [None] * len(addresses)
+
     def _extract_route_locations(self, question: str, intent_data: Dict[str, Any] = None):
         d = intent_data or {}
         origin = (d.get("origin") or "").strip()
@@ -927,59 +1024,77 @@ class RealAgent:
                 sources=["geoanalytics-engine"],
             )
 
+        # ── Step 1: try Genie for facility-name resolution ────────────────────
+        # Genie fuzzy-matches USPS facility names far better than a LIKE query
+        # or the street-address geocoder.  If both locations resolve, we skip
+        # the cluster Geocode call entirely and pass known coords to CreateRoutes.
+        resolved = self._resolve_locations_via_genie(origin, dest)
+        o_res, d_res = resolved[0], resolved[1]
+
+        # ── Step 2: geocode only the locations Genie/coords couldn't resolve ─
+        # Works for: raw coords (already set), named facilities (from Genie),
+        # street addresses (geocoded here), and mixed combinations.
+        _unresolved = ([(0, origin)] if not o_res else []) + ([(1, dest)] if not d_res else [])
+        if _unresolved:
+            _geo = self._geocode_addresses([addr for _, addr in _unresolved])
+            for (idx, _), geo in zip(_unresolved, _geo):
+                if idx == 0: o_res = geo
+                else:        d_res = geo
+
+        if not o_res or not d_res:
+            missing = "origin" if not o_res else "destination"
+            loc     = origin   if not o_res else dest
+            return GeoResponse(
+                answer=f"Could not resolve {missing} '{loc}'. Try a full street address or exact USPS facility name.",
+                map_data=None,
+                sources=["geoanalytics-engine"],
+            )
+
+        # ── Step 3: build CreateRoutes code with final coords ─────────────────
+        o_lat, o_lon, o_name = o_res["lat"], o_res["lon"], o_res["name"]
+        d_lat, d_lon, d_name = d_res["lat"], d_res["lon"], d_res["name"]
+        route_name = f"{o_name} to {d_name}"
         code = _build_code(
             _SPARK_SETUP,
             _GA_SETUP,
             "import json",
-            "from geoanalytics.tools import Geocode, CreateRoutes",
+            "from geoanalytics.tools import CreateRoutes",
             "from geoanalytics.sql import functions as ga_fn",
             "from pyspark.sql import functions as F",
             "from pyspark.sql import Row",
-            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
             f"network_path = {json.dumps(_GA_NETWORK_PATH)}",
-            f"addresses_df = spark.createDataFrame([({json.dumps(origin)},), ({json.dumps(dest)},)], ['address'])",
+            f"origin_match = {json.dumps(o_name)}",
+            f"destination_match = {json.dumps(d_name)}",
+            f"route_df = spark.createDataFrame([Row(RouteName={json.dumps(route_name)})])",
+            f"route_df = route_df.withColumn('Stop_1', ga_fn.point({o_lon}, {o_lat}))",
+            f"route_df = route_df.withColumn('Stop_2', ga_fn.point({d_lon}, {d_lat}))",
+            "rt = CreateRoutes()",
+            "rt.setNetwork(network_path)",
+            "rt.setStops('Stop_1', 'Stop_2')",
+            "rt.setTravelMode('Driving Time')",
+            "rt.setRouteGeometry('along_network')",
             "try:",
-            "    geocoded = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal').run(addresses_df)",
-            "    rows = geocoded.select('address', 'geocode_location', 'Score', 'Status', 'Match_addr').collect()",
-            "    matched = [row for row in rows if row.geocode_location and row.Status in ('M', 'T')]",
-            "    if len(matched) < 2:",
-            "        statuses = [{'address': row['address'], 'status': row['Status'], 'match': row['Match_addr']} for row in rows]",
-            "        print(json.dumps({'error': f'Could not geocode both addresses — got {len(matched)} usable match(es).', 'geocode_results': statuses}))",
+            "    result = rt.run(route_df)",
+            "    row = result.withColumn('route_wkt', ga_fn.as_text('route_geometry')).withColumn('route_geojson', F.expr('ST_AsGeoJSON(ST_GeomFromWKT(route_wkt))')).first()",
+            "    if row and row['route_geojson']:",
+            "        geom = json.loads(row['route_geojson'])",
+            "        if geom.get('type') == 'LineString':",
+            "            _c = geom['coordinates']; _step = max(1, len(_c)//500)",
+            "            _s = [[round(p[0],5),round(p[1],5)] for p in _c[::_step]]",
+            "            if _c and _s[-1] != [round(_c[-1][0],5),round(_c[-1][1],5)]: _s.append([round(_c[-1][0],5),round(_c[-1][1],5)])",
+            "            geom['coordinates'] = _s",
+            "        travel_time_min = round(float(row['travel_time']), 1) if row['travel_time'] is not None else None",
+            "        travel_distance_mi = round(float(row['travel_distance']) / 1609.34, 2) if row['travel_distance'] is not None else None",
+            f"        features = [{{'type': 'Feature', 'geometry': geom, 'properties': {{'route': {json.dumps(route_name)}, 'origin_match': origin_match, 'destination_match': destination_match, 'travel_time_min': travel_time_min, 'travel_distance_mi': travel_distance_mi}}}}]",
+            "        print(json.dumps({'type': 'FeatureCollection', 'features': features, 'travel_time_min': travel_time_min, 'travel_distance_mi': travel_distance_mi, 'origin_match': origin_match, 'destination_match': destination_match}))",
             "    else:",
-            f"        route_df = spark.createDataFrame([Row(RouteName={json.dumps(origin + ' to ' + dest)})])",
-            "        o_loc = matched[0]['geocode_location']",
-            "        d_loc = matched[1]['geocode_location']",
-            "        route_df = route_df.withColumn('Stop_1', ga_fn.point(o_loc.x, o_loc.y))",
-            "        route_df = route_df.withColumn('Stop_2', ga_fn.point(d_loc.x, d_loc.y))",
-            "        rt = CreateRoutes()",
-            "        rt.setNetwork(network_path)",
-            "        rt.setStops('Stop_1', 'Stop_2')",
-            "        rt.setTravelMode('Driving Time')",
-            "        rt.setRouteGeometry('along_network')",
-            "        result = rt.run(route_df)",
-            "        row = result.withColumn('route_wkt', ga_fn.as_text('route_geometry')).withColumn('route_geojson', F.expr('ST_AsGeoJSON(ST_GeomFromWKT(route_wkt))')).first()",
-            f"        origin_match = matched[0]['Match_addr'] or {json.dumps(origin)}",
-            f"        destination_match = matched[1]['Match_addr'] or {json.dumps(dest)}",
-            "        if row and row['route_geojson']:",
-            "            geom = json.loads(row['route_geojson'])",
-            "            # Reduce vertex count so output stays under API limit",
-            "            if geom.get('type') == 'LineString':",
-            "                _c = geom['coordinates']; _step = max(1, len(_c)//500)",
-            "                _s = [[round(p[0],5),round(p[1],5)] for p in _c[::_step]]",
-            "                if _c and _s[-1] != [round(_c[-1][0],5),round(_c[-1][1],5)]: _s.append([round(_c[-1][0],5),round(_c[-1][1],5)])",
-            "                geom['coordinates'] = _s",
-            "            travel_time_min = round(float(row['travel_time']), 1) if row['travel_time'] is not None else None",
-            "            travel_distance_mi = round(float(row['travel_distance']) / 1609.34, 2) if row['travel_distance'] is not None else None",
-            f"            route_name = {json.dumps(origin + ' to ' + dest)}",
-            "            features = [{'type': 'Feature', 'geometry': geom, 'properties': {'route': route_name, 'origin_match': origin_match, 'destination_match': destination_match, 'travel_time_min': travel_time_min, 'travel_distance_mi': travel_distance_mi}}]",
-            "            print(json.dumps({'type': 'FeatureCollection', 'features': features, 'travel_time_min': travel_time_min, 'travel_distance_mi': travel_distance_mi, 'origin_match': origin_match, 'destination_match': destination_match}))",
-            "        else:",
-            f"            route_name = {json.dumps(origin + ' to ' + dest)}",
-            "            features = [{'type': 'Feature', 'geometry': {'type': 'LineString', 'coordinates': [[o_loc.x, o_loc.y], [d_loc.x, d_loc.y]]}, 'properties': {'route': route_name, 'origin_match': origin_match, 'destination_match': destination_match, 'note': 'straight-line estimate'}}]",
-            "            print(json.dumps({'type': 'FeatureCollection', 'features': features, 'origin_match': origin_match, 'destination_match': destination_match}))",
+            f"        features = [{{'type': 'Feature', 'geometry': {{'type': 'LineString', 'coordinates': [[{o_lon}, {o_lat}], [{d_lon}, {d_lat}]]}}, 'properties': {{'route': {json.dumps(route_name)}, 'origin_match': origin_match, 'destination_match': destination_match, 'note': 'straight-line estimate'}}}}]",
+            "        print(json.dumps({'type': 'FeatureCollection', 'features': features, 'origin_match': origin_match, 'destination_match': destination_match}))",
             "except Exception as e:",
             "    print(json.dumps({'error': str(e)}))",
         )
+
+        # ── Response parsing (shared by both paths) ───────────────────────────
         data, error = self._run_cluster_code(code)
         if error:
             return GeoResponse(answer=f"Route error: {error}", map_data=None, sources=["geoanalytics-engine"])
@@ -988,21 +1103,20 @@ class RealAgent:
             if isinstance(parsed, dict) and "error" in parsed:
                 return GeoResponse(answer=f"Route error: {parsed['error']}", map_data=None, sources=["geoanalytics-engine"])
             display_origin = parsed.get("origin_match") or origin
-            display_dest = parsed.get("destination_match") or dest
-            travel_time = parsed.get("travel_time_min")
+            display_dest   = parsed.get("destination_match") or dest
+            travel_time    = parsed.get("travel_time_min")
             travel_distance = parsed.get("travel_distance_mi")
             route_steps = [
                 f"Start at {display_origin}.",
                 f"Drive to {display_dest}.",
                 f"Estimated travel time: {travel_time} minutes." if travel_time is not None else None,
                 f"Estimated travel distance: {travel_distance} miles." if travel_distance is not None else None,
-                "Map shows the computed driving route. Detailed turn-by-turn maneuvers are not available from the current route output."
+                "Map shows the computed driving route. Detailed turn-by-turn maneuvers are not available from the current route output.",
             ]
             answer = "\n".join(step for step in route_steps if step)
             return GeoResponse(answer=answer, map_data=parsed, sources=["geoanalytics-engine"])
         except Exception:
             return GeoResponse(answer=f"Route raw output: {str(data)[:1000]}", map_data=None, sources=["debug"])
-
     def _handle_service_area(self, question: str, intent_data: Dict[str, Any] = None, history: Optional[List[Dict[str, str]]] = None) -> GeoResponse:
         d = intent_data or {}
         zip_code = d.get("zip_code")
@@ -2062,7 +2176,11 @@ class RealAgent:
         import urllib.error
         d = intent_data or {}
         state = d.get("state")
-        layer = d.get("layer") or ("boxes" if any(w in question.lower() for w in ["box", "collection", "cpms"]) else "facilities")
+        layer = d.get("layer") or (
+            "boxes" if any(w in question.lower() for w in ["box", "collection", "cpms"])
+            else "deliveries" if any(w in question.lower() for w in ["deliv", "dpf", "delivery point"])
+            else "facilities"
+        )
         if not state:
             _, state = self._extract_city_state(question)
         url = "https://api.weather.gov/alerts/active?status=actual"
@@ -2088,12 +2206,42 @@ class RealAgent:
                 alert_info.append({"event": props.get("event", "Alert"), "headline": props.get("headline", ""), "severity": props.get("severity", "Unknown")})
         if not alert_polygons:
             return GeoResponse(answer=f"Found {len(all_features)} active alert(s) but none have polygon geometry for containment.", map_data=None, sources=["noaa-nws"])
+        # Bounding-box pre-filter for DPF (avoids scanning millions of rows)
+        _bbox = None
+        if layer == "deliveries" and alert_polygons:
+            _all_lons, _all_lats = [], []
+            for _gjs in alert_polygons:
+                _g = json.loads(_gjs)
+                _rings = (_g["coordinates"] if _g["type"] == "Polygon"
+                          else [r for poly in _g["coordinates"] for r in poly])
+                for _ring in _rings:
+                    for _c in _ring:
+                        _all_lons.append(_c[0]); _all_lats.append(_c[1])
+            if _all_lons:
+                _bbox = (min(_all_lats) - 0.05, max(_all_lats) + 0.05,
+                         min(_all_lons) - 0.05, max(_all_lons) + 0.05)
         if layer == "boxes":
             fac_sql = f"SELECT BOX_NBR AS label, BOX_ADDRESS AS address, CITY, STATE, LATITUDE, LONGITUDE FROM {_TBL_BOXES} WHERE LATITUDE IS NOT NULL AND LATITUDE != 0 AND LONGITUDE IS NOT NULL AND LONGITUDE != 0"
             kind = "collection boxes"
+            display_cap = 100
+        elif layer == "deliveries":
+            _bbox_clause = (
+                f" AND DPF_LAT BETWEEN {_bbox[0]} AND {_bbox[1]} AND DPF_LON BETWEEN {_bbox[2]} AND {_bbox[3]}"
+                if _bbox else ""
+            )
+            fac_sql = (
+                f"SELECT DETAIL_ZIP_CODE AS label, DEL_POINT_TYPE, VACANT_IND, "
+                f"DPF_LAT AS LATITUDE, DPF_LON AS LONGITUDE "
+                f"FROM edlprod.geo_analytics.ams_delivery_point_t "
+                f"WHERE DPF_LAT IS NOT NULL AND DPF_LAT != 0 "
+                f"AND DPF_LON IS NOT NULL AND DPF_LON != 0{_bbox_clause}"
+            )
+            kind = "delivery points"
+            display_cap = 500
         else:
             fac_sql = f"SELECT LOCALE_NAME AS label, FACILITY_TYPE AS ftype, ADDRESS AS address, CITY, STATE, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} WHERE LATITUDE IS NOT NULL AND LATITUDE != 0 AND LONGITUDE IS NOT NULL AND LONGITUDE != 0"
             kind = "facilities"
+            display_cap = 100
         code = _build_code(
             _SPARK_SETUP,
             "import json",
@@ -2106,7 +2254,7 @@ class RealAgent:
             "    contained_rows = []",
             "    seen_labels = set()",
             "    for i, geojson_str in enumerate(alert_geojsons):",
-            "        if len(contained_rows) >= 100:",
+            f"        if len(contained_rows) >= {display_cap}:",
             "            break",
             "        geom = json.loads(geojson_str)",
             "        if geom['type'] == 'Polygon':",
@@ -2122,12 +2270,14 @@ class RealAgent:
             "        matches = fac_df.filter(F.expr(f\"ST_Contains(ST_GeomFromWKT('{wkt}'), ST_Point(LONGITUDE, LATITUDE))\")).collect()",
             "        for r in matches:",
             "            lbl = r['label']",
-            "            if lbl not in seen_labels and len(contained_rows) < 100:",
+            f"            if lbl not in seen_labels and len(contained_rows) < {display_cap}:",
             "                seen_labels.add(lbl)",
             "                row_dict = {'label': r['label'], '_alert_event': alert_infos[i]['event'], '_alert_idx': i}",
             "                if 'ftype' in r.asDict(): row_dict['ftype'] = r['ftype']",
             "                if 'CITY' in r.asDict(): row_dict['CITY'] = r['CITY']",
             "                if 'STATE' in r.asDict(): row_dict['STATE'] = r['STATE']",
+                "                if 'DEL_POINT_TYPE' in r.asDict(): row_dict['type'] = r['DEL_POINT_TYPE']",
+                "                if 'VACANT_IND' in r.asDict(): row_dict['vacant'] = r['VACANT_IND']",
             "                contained_rows.append({'props': row_dict, 'lat': float(r['LATITUDE']), 'lon': float(r['LONGITUDE'])})",
             "    features = []",
             "    for cr in contained_rows:",
@@ -2252,6 +2402,31 @@ class RealAgent:
         except Exception:
             return None
 
+    @staticmethod
+    def _convert_wm_geometry_py(geom_raw: str) -> Optional[Dict]:
+        """Convert a web-mercator ring JSON string to a WGS-84 GeoJSON geometry dict.
+        Pure Python — no Spark / cluster call needed.
+        Handles both flat [ring, …] and polygon-wrapped [[ring, …], …] structures."""
+        import math
+        def _wm2ll(x: float, y: float) -> list:
+            lon = (x / 20037508.34) * 180.0
+            lat = (y / 20037508.34) * 180.0
+            lat = 180.0 / math.pi * (2.0 * math.atan(math.exp(lat * math.pi / 180.0)) - math.pi / 2.0)
+            return [round(lon, 6), round(lat, 6)]
+        try:
+            rings = json.loads(geom_raw) if isinstance(geom_raw, str) else geom_raw
+            if not rings:
+                return None
+            flat = rings if isinstance(rings[0][0][0], (int, float)) else [r for poly in rings for r in poly]
+            converted = [[_wm2ll(pt[0], pt[1]) for pt in ring] for ring in flat if ring]
+            if not converted:
+                return None
+            if len(converted) == 1:
+                return {"type": "Polygon", "coordinates": converted}
+            return {"type": "MultiPolygon", "coordinates": [[r] for r in converted]}
+        except Exception:
+            return None
+
     def _handle_box_analytic(self, question: str) -> Optional[GeoResponse]:
         """Direct-SQL handler for collection box analytics (cpms_co_t).
         Covers state/city/national counts, type breakdowns, and general box lookups
@@ -2261,6 +2436,18 @@ class RealAgent:
         _box_kw = ("box", "boxes", "collection", "cpms", "blue box")
         if not any(w in q for w in _box_kw):
             return None
+        # Pure analytics/count questions are handled better by Genie (has cpms_co_t).
+        # Only intercept when the user wants map points (show/find/display/where).
+        _map_intents = re.compile(
+            r"\b(show|display|map|plot|find|where|list|locate|near|closest|nearest)\b",
+            re.IGNORECASE,
+        )
+        _count_only = re.compile(
+            r"\b(how many|count|total|number of|breakdown|by type|types? of|how are)\b",
+            re.IGNORECASE,
+        )
+        if _count_only.search(question) and not _map_intents.search(question):
+            return None  # Let Genie answer analytics/count questions directly
 
         # ── location extraction ─────────────────────────────────────────
         zip_m = re.search(r"\b(\d{5})\b", question)
@@ -2410,30 +2597,7 @@ class RealAgent:
         if box_result is not None:
             return box_result
 
-        # Normalise delivery-related terminology before sending to Genie.
-        # The word "deliveries" makes Genie think events-over-time and ask
-        # for a time period; "delivery points" maps directly to the DPF table.
-        _dpf_kw = re.compile(
-            r"\b(deliveries|delivery(?!\s+point))\b", re.IGNORECASE
-        )
-        genie_question = _dpf_kw.sub(
-            lambda m: "delivery points" if m.group().lower() in ("deliveries", "delivery") else m.group(),
-            question,
-        )
-        result = self._query_genie(genie_question)
-        # If Genie returned only clarifying text (no SQL ran), retry once with
-        # an explicit instruction to return the count and zip code.
-        if not result.get("rows") and result.get("answer"):
-            _clarif = re.compile(
-                r"\b(prefer|instead|specify|time period|date range|clarify|which table|more specific)\b",
-                re.IGNORECASE,
-            )
-            if _clarif.search(result["answer"]):
-                retry_q = (
-                    genie_question.rstrip("?. ")
-                    + " — please run the query now and return the zip code and delivery point count."
-                )
-                result = self._query_genie(retry_q)
+        result = self._query_genie(question)
         answer = result.get("answer", "No answer returned")
         rows = result.get("rows", [])
         columns = result.get("columns", [])
@@ -2468,7 +2632,50 @@ class RealAgent:
                                 except (ValueError, TypeError):
                                     pass
                 if all_zips:
-                    map_data = self._fetch_zip_boundaries_for_map(all_zips, color_map)
+                    # Cap displayed ZIPs to top 50 by count to keep map responsive
+                    if len(all_zips) > 50:
+                        _top_zips = sorted(count_map, key=count_map.get, reverse=True)[:50]
+                        _top_set  = set(_top_zips)
+                        all_zips  = _top_zips
+                        count_map = {z: v for z, v in count_map.items() if z in _top_set}
+                        color_map = {z: v for z, v in color_map.items() if z in _top_set}
+                    # ── Inline geometry: use whatever Genie already returned ──────
+                    # Avoids a second cluster round-trip when Genie included geometry.
+                    # Priority: (a) GEOMETRY rings → polygons  (b) lat/lon → points
+                    # Fallback: _fetch_zip_boundaries_for_map (separate cluster call)
+                    _geom_ci  = next((i for i, c in enumerate(col_lower) if c == "geometry"), None)
+                    _lat_ci   = next((i for i, c in enumerate(col_lower) if c in ("latitude","lat","dfp_lat","dpf_lat")), None)
+                    _lon_ci   = next((i for i, c in enumerate(col_lower) if c in ("longitude","lon","lng","dfp_lon","dpf_lon")), None)
+                    _top_set  = set(all_zips)
+                    if _geom_ci is not None or (_lat_ci is not None and _lon_ci is not None):
+                        _feats: list = []
+                        for _row in rows:
+                            _zv = str(_row[zip_col_idxs[0]]) if _row[zip_col_idxs[0]] else ""
+                            if _zv not in _top_set:
+                                continue
+                            _props: Dict[str, Any] = {"ZIP": _zv}
+                            for _ec in ("PO_NAME", "STATE", "DETAIL_ZIP_CODE"):
+                                _ei = next((i for i, c in enumerate(columns) if c.upper() == _ec), None)
+                                if _ei is not None and _row[_ei] is not None:
+                                    _props[_ec] = _row[_ei]
+                            # Polygon from ring geometry
+                            if _geom_ci is not None and _row[_geom_ci]:
+                                _geom = RealAgent._convert_wm_geometry_py(_row[_geom_ci])
+                                if _geom:
+                                    _feats.append({"type": "Feature", "geometry": _geom, "properties": dict(_props)})
+                            # Point from lat/lon (centroid marker or individual point)
+                            if _lat_ci is not None and _lon_ci is not None:
+                                try:
+                                    _lat, _lon = float(_row[_lat_ci]), float(_row[_lon_ci])
+                                    if -90 <= _lat <= 90 and -180 <= _lon <= 180 and (_lat, _lon) != (0.0, 0.0):
+                                        _feats.append({"type": "Feature",
+                                                       "geometry": {"type": "Point", "coordinates": [round(_lon, 6), round(_lat, 6)]},
+                                                       "properties": dict(_props)})
+                                except (TypeError, ValueError):
+                                    pass
+                        map_data = {"type": "FeatureCollection", "features": _feats} if _feats else None
+                    if map_data is None:
+                        map_data = self._fetch_zip_boundaries_for_map(all_zips, color_map)
                     # Stamp count onto every feature regardless of how many ZIPs
                     if map_data and count_map:
                         sorted_zips = sorted(count_map, key=count_map.get, reverse=True)
@@ -2491,8 +2698,6 @@ class RealAgent:
                                 _f.get("properties", {}).pop("_color", None)
                         else:
                             map_data.setdefault("properties", {})["heat_fill"] = True
-                    # Build a data-driven answer whenever Genie returned actual rows
-                    # (overrides clarifying-question text that Genie sometimes emits)
                     if all_zips and count_map:
                         top_zip = max(count_map, key=count_map.get)
                         top_count = int(count_map[top_zip])
@@ -2586,6 +2791,37 @@ class GISAgent:
         def _run():
             q_lower = question.lower()
 
+            # ── Meta: "what tables / data do you have access to" ───────────────
+            _META_TABLE_RE = re.compile(
+                r"(what tables?|which tables?|what data|what (do you|can you)"
+                r"|data sources?|access to|capabilities|what('s| is) available)",
+                re.IGNORECASE,
+            )
+            if _META_TABLE_RE.search(question):
+                _tbl_answer = (
+                    "I have access to the following tables in edlprod.geo_analytics:\n\n"
+                    "Via Genie (analytics & counts):\n"
+                    "  1. ams_delivery_point_t \u2014 delivery points (ZIP, lat/lon, type, vacancy)\n"
+                    "  2. facilities_fc \u2014 USPS facilities (name, type, address, lat/lon)\n"
+                    "  3. cpms_co_t \u2014 collection boxes (box number, address, type, lat/lon)\n"
+                    "  4. usps_zip5 \u2014 ZIP code boundaries (ZIP, city, state, geometry)\n"
+                    "  5. facility_network \u2014 network facilities (RPDC, SDC, LPC, etc.)\n\n"
+                    "Via direct SQL (boundaries & spatial lookups):\n"
+                    "  6. gis1_states \u2014 state boundaries\n"
+                    "  7. gis1_counties \u2014 county boundaries\n"
+                    "  8. gis1_district \u2014 USPS district boundaries (with area/region hierarchy)\n"
+                    "  9. gis1_zip3 \u2014 ZIP3 area boundaries\n"
+                    " 10. gis1_logistics_divisions \u2014 logistics division boundaries\n"
+                    " 11. gis1_logistics_regions \u2014 logistics region boundaries\n"
+                    " 12. gis1_processing_divisions \u2014 processing division boundaries\n"
+                    " 13. gis1_processing_regions \u2014 processing region boundaries\n"
+                    " 14. gis1_congressional_districts \u2014 congressional district boundaries\n"
+                    " 15. gis1_retail_delivery_areas \u2014 retail delivery area boundaries\n"
+                    " 16. gis1_facilities_boundaries \u2014 individual facility footprint polygons\n"
+                    " 17. gis1_route_bndy \u2014 delivery route boundaries"
+                )
+                return GeoResponse(answer=_tbl_answer, map_data=None, sources=["geo_analytics"])
+
             # ── Deterministic SA-containment pre-check ──────────────────────────
             # Catches follow-up questions like "what facilities are within the 5 min
             # service area" that the LLM often misroutes to genie when no explicit
@@ -2617,7 +2853,7 @@ class GISAgent:
             # ── Deterministic weather pre-checks ──────────────────────────────────
             # Catches "active weather alerts in TN", "tornado warnings in Texas", etc.
             if _WEATHER_RE.search(question):
-                if any(w in q_lower for w in ["box", "collection", "cpms", "facil", "office", "plant"]):
+                if any(w in q_lower for w in ["box", "collection", "cpms", "facil", "office", "plant", "deliv", "dpf"]):
                     return _INTENT_HANDLERS["weather_containment"](ra, question, {}, history_list)
                 return _INTENT_HANDLERS["weather_alerts"](ra, question, {}, history_list)
 
