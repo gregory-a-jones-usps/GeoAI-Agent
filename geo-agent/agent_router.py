@@ -2176,7 +2176,11 @@ class RealAgent:
         import urllib.error
         d = intent_data or {}
         state = d.get("state")
-        layer = d.get("layer") or ("boxes" if any(w in question.lower() for w in ["box", "collection", "cpms"]) else "facilities")
+        layer = d.get("layer") or (
+            "boxes" if any(w in question.lower() for w in ["box", "collection", "cpms"])
+            else "deliveries" if any(w in question.lower() for w in ["deliv", "dpf", "delivery point"])
+            else "facilities"
+        )
         if not state:
             _, state = self._extract_city_state(question)
         url = "https://api.weather.gov/alerts/active?status=actual"
@@ -2202,12 +2206,42 @@ class RealAgent:
                 alert_info.append({"event": props.get("event", "Alert"), "headline": props.get("headline", ""), "severity": props.get("severity", "Unknown")})
         if not alert_polygons:
             return GeoResponse(answer=f"Found {len(all_features)} active alert(s) but none have polygon geometry for containment.", map_data=None, sources=["noaa-nws"])
+        # Bounding-box pre-filter for DPF (avoids scanning millions of rows)
+        _bbox = None
+        if layer == "deliveries" and alert_polygons:
+            _all_lons, _all_lats = [], []
+            for _gjs in alert_polygons:
+                _g = json.loads(_gjs)
+                _rings = (_g["coordinates"] if _g["type"] == "Polygon"
+                          else [r for poly in _g["coordinates"] for r in poly])
+                for _ring in _rings:
+                    for _c in _ring:
+                        _all_lons.append(_c[0]); _all_lats.append(_c[1])
+            if _all_lons:
+                _bbox = (min(_all_lats) - 0.05, max(_all_lats) + 0.05,
+                         min(_all_lons) - 0.05, max(_all_lons) + 0.05)
         if layer == "boxes":
             fac_sql = f"SELECT BOX_NBR AS label, BOX_ADDRESS AS address, CITY, STATE, LATITUDE, LONGITUDE FROM {_TBL_BOXES} WHERE LATITUDE IS NOT NULL AND LATITUDE != 0 AND LONGITUDE IS NOT NULL AND LONGITUDE != 0"
             kind = "collection boxes"
+            display_cap = 100
+        elif layer == "deliveries":
+            _bbox_clause = (
+                f" AND DPF_LAT BETWEEN {_bbox[0]} AND {_bbox[1]} AND DPF_LON BETWEEN {_bbox[2]} AND {_bbox[3]}"
+                if _bbox else ""
+            )
+            fac_sql = (
+                f"SELECT DETAIL_ZIP_CODE AS label, DEL_POINT_TYPE, VACANT_IND, "
+                f"DPF_LAT AS LATITUDE, DPF_LON AS LONGITUDE "
+                f"FROM edlprod.geo_analytics.ams_delivery_point_t "
+                f"WHERE DPF_LAT IS NOT NULL AND DPF_LAT != 0 "
+                f"AND DPF_LON IS NOT NULL AND DPF_LON != 0{_bbox_clause}"
+            )
+            kind = "delivery points"
+            display_cap = 500
         else:
             fac_sql = f"SELECT LOCALE_NAME AS label, FACILITY_TYPE AS ftype, ADDRESS AS address, CITY, STATE, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} WHERE LATITUDE IS NOT NULL AND LATITUDE != 0 AND LONGITUDE IS NOT NULL AND LONGITUDE != 0"
             kind = "facilities"
+            display_cap = 100
         code = _build_code(
             _SPARK_SETUP,
             "import json",
@@ -2220,7 +2254,7 @@ class RealAgent:
             "    contained_rows = []",
             "    seen_labels = set()",
             "    for i, geojson_str in enumerate(alert_geojsons):",
-            "        if len(contained_rows) >= 100:",
+            f"        if len(contained_rows) >= {display_cap}:",
             "            break",
             "        geom = json.loads(geojson_str)",
             "        if geom['type'] == 'Polygon':",
@@ -2236,12 +2270,14 @@ class RealAgent:
             "        matches = fac_df.filter(F.expr(f\"ST_Contains(ST_GeomFromWKT('{wkt}'), ST_Point(LONGITUDE, LATITUDE))\")).collect()",
             "        for r in matches:",
             "            lbl = r['label']",
-            "            if lbl not in seen_labels and len(contained_rows) < 100:",
+            f"            if lbl not in seen_labels and len(contained_rows) < {display_cap}:",
             "                seen_labels.add(lbl)",
             "                row_dict = {'label': r['label'], '_alert_event': alert_infos[i]['event'], '_alert_idx': i}",
             "                if 'ftype' in r.asDict(): row_dict['ftype'] = r['ftype']",
             "                if 'CITY' in r.asDict(): row_dict['CITY'] = r['CITY']",
             "                if 'STATE' in r.asDict(): row_dict['STATE'] = r['STATE']",
+                "                if 'DEL_POINT_TYPE' in r.asDict(): row_dict['type'] = r['DEL_POINT_TYPE']",
+                "                if 'VACANT_IND' in r.asDict(): row_dict['vacant'] = r['VACANT_IND']",
             "                contained_rows.append({'props': row_dict, 'lat': float(r['LATITUDE']), 'lon': float(r['LONGITUDE'])})",
             "    features = []",
             "    for cr in contained_rows:",
@@ -2817,7 +2853,7 @@ class GISAgent:
             # ── Deterministic weather pre-checks ──────────────────────────────────
             # Catches "active weather alerts in TN", "tornado warnings in Texas", etc.
             if _WEATHER_RE.search(question):
-                if any(w in q_lower for w in ["box", "collection", "cpms", "facil", "office", "plant"]):
+                if any(w in q_lower for w in ["box", "collection", "cpms", "facil", "office", "plant", "deliv", "dpf"]):
                     return _INTENT_HANDLERS["weather_containment"](ra, question, {}, history_list)
                 return _INTENT_HANDLERS["weather_alerts"](ra, question, {}, history_list)
 
