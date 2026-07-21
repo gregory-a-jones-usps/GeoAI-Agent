@@ -771,11 +771,14 @@ function showMap(geojson){
   L.geoJSON(geojson, {
     filter: f => isPoint(f),
     pointToLayer:(f,ll)=>{
-      const isBox = (f.properties||{})._layer === 'boxes';
+      const props = f.properties||{};
+      const isBox = props._layer === 'boxes';
       const pin = colorByType ? resolvePin(f) : { color:DEFAULT_PIN_COLOR, label:DEFAULT_PIN_LABEL };
       if(colorByType) usedLabels.add(isBox ? 'Collection Box' : pin.label);
-      const icon = isBox ? makeBoxIcon(pin.color || '#16a34a') : makeIcon(pin.color);
-      return L.marker(ll, { icon });
+      // ArcGIS pattern: individual points are always small (8px),
+      // clusters provide the larger visual (32-50px)
+      const color = isBox ? (pin.color||'#16a34a') : (pin.color||'#69dcff');
+      return L.circleMarker(ll, {radius:4, fillColor:color, color:'rgba(0,139,174,0.5)', weight:1.5, fillOpacity:0.9});
     },
     onEachFeature: bindPopup
   }).addTo(pointLayer);
