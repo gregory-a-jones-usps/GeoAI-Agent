@@ -54,7 +54,7 @@ _SA_CONTAIN_KW = [
     "in that isochrone", "within that isochrone",
 ]
 
-_LAYER_KW = ["facilit", "office", "plant", "box", "collection", "cpms", "p&dc", "ndc"]
+_LAYER_KW = ["facilit", "office", "plant", "box", "collection", "cpms", "p&dc", "ndc", "business", "businesses", "company", "companies", "store", "stores", "restaurant", "shop"]
 _SA_KW = ["drive time", "drivetime", "drive-time", "service area", "isochrone"]
 _BDY_KW = ["boundary", "border", "outline", "polygon", "shape of"]
 _WEATHER_KW = [
@@ -289,6 +289,18 @@ _LAYER_CONFIG = {
         "keywords": ["box", "collection", "cpms"],
         "label": "collection boxes",
     },
+    "businesses": {
+        "table": "edlprod.geo_analytics.us_businesses",
+        "label_col": "CONAME",
+        "zip_col": "ZIP",
+        "city_col": "CITY",
+        "state_col": "STATE",
+        "select_fields": "CONAME AS label, CITY || \', \' || STATE AS address, NAICS_DESC AS industry, ESRI_CATEGORY_DESC AS category, EMPNUM AS employees, CAST(SALESVOL AS INT) AS sales_volume, LATITUDE, LONGITUDE",
+        "select_fields_minimal": "CONAME AS label, CITY || \', \' || STATE AS address, LATITUDE, LONGITUDE",
+        "non_zero_filter": "LATITUDE IS NOT NULL AND LATITUDE != 0 AND LONGITUDE IS NOT NULL AND LONGITUDE != 0",
+        "keywords": ["business", "businesses", "company", "companies", "store", "stores", "restaurant", "shop"],
+        "label": "businesses",
+    },
 }
 
 
@@ -343,13 +355,12 @@ def _geojson_to_wkt(geom: Dict[str, Any]) -> str:
 
 
 def _containment_point_sql(layer: str) -> str:
-    """SQL to fetch the point layer for containment. Returns label, LATITUDE, LONGITUDE."""
+    """SQL to fetch the point layer for containment. Uses minimal fields + LIMIT to stay under inline byte limit."""
     cfg = _LAYER_CONFIG[layer]
     return (
-        f"SELECT {cfg['select_fields']}, LATITUDE, LONGITUDE "
+        f"SELECT {cfg['select_fields_minimal']} "
         f"FROM {cfg['table']} "
-        f"WHERE LATITUDE IS NOT NULL AND LATITUDE != 0 "
-        f"AND LONGITUDE IS NOT NULL AND LONGITUDE != 0"
+        f"WHERE {cfg['non_zero_filter']}"
     )
 
 
@@ -540,18 +551,23 @@ def _classify_intent(question: str, history: Optional[List[Dict[str, str]]] = No
         return tier1
     q = question.lower()
     if re.search(r"\btop\s+\d*\s*zips?\b", q) or any(w in q for w in ["rank zip", "ranking zip"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
+        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
         return {"intent": "zip_ranking", "layer": layer}
     if any(w in q for w in ["inside zip", "within zip", "in zip"]) and any(w in q for w in ["count", "how many"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
+        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
         return {"intent": "zip_count", "layer": layer}
     if re.search(r"\b(nearest|closest)\b", q):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
+        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
         return {"intent": "nearest", "layer": layer}
     if any(w in q for w in _BDY_KW):
         zip_m = re.search(r"\b(\d{5})\b", question)
         if zip_m:
             return {"intent": "boundary", "boundary_type": "zip", "boundary_value": zip_m.group(1)}
+    # Layer keyword + ZIP code → zip count/lookup
+    zip_m = re.search(r"\b(\d{5})\b", question)
+    if zip_m and any(w in q for w in _LAYER_KW):
+        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+        return {"intent": "zip_count", "layer": layer, "zip_code": zip_m.group(1)}
     return {"intent": "genie"}
 
 
@@ -566,7 +582,7 @@ def _tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = Non
     # Also require a layer keyword (facilities/boxes) to distinguish from plain SA generation requests
     _has_layer_word = any(w in q for w in _LAYER_KW)
     if _has_containment_word and _has_layer_word:
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
+        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
         # Try to get a specific break from the question (e.g., "in the 5 min service area")
         breaks_m = re.search(r"(\d+)\s*(?:min|minute)", q, re.I)
         specific_break = breaks_m.group(1) if breaks_m else None
@@ -623,7 +639,7 @@ def _tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = Non
         # If just asking about weather/alerts, show the alert listing.
         has_layer_kw = any(w in q for w in _LAYER_KW)
         if has_layer_kw:
-            layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
+            layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
             return {"intent": "weather_containment", "layer": layer, "state": state_tok}
         return {"intent": "weather_alerts", "state": state_tok}
 
@@ -646,7 +662,7 @@ def _tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = Non
             return {"intent": "service_area", "origin": origin_m.group(1).strip(), "breaks": breaks}
 
     if re.search(r"\b(nearest|closest)\b", q):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
+        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
         ref_m = re.search(r"\b(?:nearest|closest)\b.*?\b(?:to|from|near)\s+(.+?)$", question, re.I)
         if ref_m:
             return {"intent": "nearest", "layer": layer, "reference_location": ref_m.group(1).strip()}
@@ -678,15 +694,15 @@ def _tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = Non
             return {"intent": "boundary", "boundary_type": "county", "boundary_value": cname, "state": state_hit or ""}
 
     if re.search(r"\btop\s+\d*\s*zips?\b", q) or any(w in q for w in ["rank zip", "ranking zip"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
+        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
         return {"intent": "zip_ranking", "layer": layer}
 
     if zip_m and any(w in q for w in ["inside", "within", "in zip"]) and any(w in q for w in ["count", "how many"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
+        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
         return {"intent": "zip_count", "layer": layer, "zip_code": zip_m.group(1)}
 
     if zip_m and any(w in q for w in _LAYER_KW):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
+        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
         return {"intent": "spatial_lookup", "layer": layer, "zip_code": zip_m.group(1)}
 
     return None
@@ -1096,8 +1112,12 @@ class RealAgent:
         return result, None
 
     def _get_sql_warehouse_id(self):
-        """Get any available SQL warehouse for serverless queries."""
+        """Get SQL warehouse ID - env var first, then discover."""
         if not hasattr(self, "_sql_warehouse_id") or not self._sql_warehouse_id:
+            env_wh = os.environ.get("SQL_WAREHOUSE_ID", "")
+            if env_wh:
+                self._sql_warehouse_id = env_wh
+                return self._sql_warehouse_id
             try:
                 warehouses = self.w.api_client.do("GET", "/api/2.0/sql/warehouses")
                 for wh in warehouses.get("warehouses", []):
@@ -1528,54 +1548,67 @@ class RealAgent:
         return GeoResponse(answer=f"There are {cnt} {label} with ZIP {zip_code}.", map_data=None, sources=["serverless-sql"])
 
     def _handle_spatial_lookup(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
+        """Fetch points for a layer within a ZIP code via serverless SQL."""
         q = question.lower()
         layer = intent_data.get("layer") if intent_data else None
         zip_code = intent_data.get("zip_code") if intent_data else None
         if not zip_code:
             m = re.search(r"\b(\d{5})\b", question)
             zip_code = m.group(1) if m else None
-        fetch_boxes = layer == "boxes" or any(w in q for w in ["box", "collection", "cpms"])
-        fetch_facilities = layer == "facilities" or any(w in q for w in ["facilit", "office", "plant", "p&dc", "ndc"])
         if not zip_code:
-            return GeoResponse(answer="Please include a ZIP code.", map_data=None, sources=["geo_analytics"])
+            return GeoResponse(answer="Please include a ZIP code.", map_data=None, sources=["serverless-sql"])
 
-        zip_geom_sql = f"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP = '{zip_code}'"
-        boxes_sql = f"SELECT BOX_NBR, BOX_ADDRESS, BOX_TYPE, LATITUDE, LONGITUDE FROM {_TBL_BOXES} WHERE ZIP5 = '{zip_code}' AND LATITUDE != 0"
-        facilities_sql = f"SELECT LOCALE_NAME, FACILITY_TYPE, ADDRESS, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} WHERE ZIP_CODE = '{zip_code}' AND LATITUDE != 0"
+        # Determine layer
+        if not layer:
+            if any(w in q for w in ["box", "collection", "cpms"]):
+                layer = "boxes"
+            elif any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]):
+                layer = "businesses"
+            else:
+                layer = "facilities"
 
-        code = _build_code(
-            _SPARK_SETUP,
-            "import json",
-            _NORM_RINGS_FN,
-            f"zip_code = {json.dumps(zip_code)}",
-            "features = []",
-            f"rows = spark.sql({json.dumps(zip_geom_sql)}).collect()",
-            "if rows and rows[0][0]:",
-            "    geom = _convert_geom_display(json.loads(rows[0][0]))",
-            "    features.append({'type': 'Feature', 'geometry': geom, 'properties': {'ZIP': zip_code}})",
-            *( [f"rows = spark.sql({json.dumps(boxes_sql)}).collect()",
-                "for r in rows:",
-                "    lat, lon = float(r['LATITUDE']), float(r['LONGITUDE'])",
-                "    if -90 <= lat <= 90 and -180 <= lon <= 180:",
-                "        features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}, 'properties': {'BOX_NBR': r['BOX_NBR'], 'BOX_ADDRESS': r['BOX_ADDRESS'], 'BOX_TYPE': r['BOX_TYPE']}})" ] if fetch_boxes else []),
-            *( [f"rows = spark.sql({json.dumps(facilities_sql)}).collect()",
-                "for r in rows:",
-                "    lat, lon = float(r['LATITUDE']), float(r['LONGITUDE'])",
-                "    if -90 <= lat <= 90 and -180 <= lon <= 180:",
-                "        features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(lon, 6), round(lat, 6)]}, 'properties': {'LOCALE_NAME': r['LOCALE_NAME'], 'FACILITY_TYPE': r['FACILITY_TYPE'], 'ADDRESS': r['ADDRESS']}})" ] if fetch_facilities else []),
-            "print(json.dumps({'type': 'FeatureCollection', 'features': features}))",
-        )
-        data, error = self._run_cluster_code(code)
+        cfg = _LAYER_CONFIG.get(layer, _LAYER_CONFIG["facilities"])
+        # Query points (limit 5000 for display)
+        point_sql = f"SELECT {cfg['select_fields']} FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']} LIMIT 5000"
+        rows, error = self._run_serverless_sql(point_sql)
         if error:
-            return GeoResponse(answer=f"Spatial lookup error: {error}", map_data=None, sources=["geo_analytics"])
-        try:
-            parsed = json.loads(data)
-            pts = sum(1 for f in parsed.get("features", []) if f.get("geometry", {}).get("type") == "Point")
-            label = "collection boxes" if fetch_boxes else "facilities" if fetch_facilities else "features"
-            ans = f"Found {pts} {label} in ZIP {zip_code}." if pts else f"No {label} found in ZIP {zip_code}."
-            return GeoResponse(answer=ans, map_data=parsed if parsed.get("features") else None, sources=["geo_analytics"])
-        except Exception:
-            return GeoResponse(answer=f"Spatial lookup raw: {str(data)[:500]}", map_data=None, sources=["debug"])
+            return GeoResponse(answer=f"Spatial lookup error: {error}", map_data=None, sources=["serverless-sql"])
+
+        features = []
+        # ZIP boundary polygon
+        bdy_rows, _ = self._run_serverless_sql(f"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP = '{zip_code}'")
+        if bdy_rows and bdy_rows[0].get("GEOMETRY"):
+            try:
+                raw_rings = json.loads(bdy_rows[0]["GEOMETRY"])
+                normalized = _norm_rings(raw_rings)
+                coords = [_convert_ring(ring) for ring in normalized]
+                if coords and coords[0]:
+                    features.append({"type": "Feature", "geometry": {"type": "Polygon", "coordinates": coords}, "properties": {"ZIP": zip_code}})
+            except Exception:
+                pass
+
+        # Point features
+        for r in (rows or []):
+            lat = r.get("LATITUDE")
+            lon = r.get("LONGITUDE")
+            if lat and lon:
+                try:
+                    lat_f, lon_f = float(lat), float(lon)
+                    if -90 <= lat_f <= 90 and -180 <= lon_f <= 180:
+                        props = {k: v for k, v in r.items() if k not in ("LATITUDE", "LONGITUDE")}
+                        features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(lon_f, 6), round(lat_f, 6)]}, "properties": props})
+                except (ValueError, TypeError):
+                    continue
+
+        pts = len([f for f in features if f.get("geometry", {}).get("type") == "Point"])
+        label = cfg.get("label", layer)
+        total_sql = f"SELECT COUNT(*) AS cnt FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']}"
+        total_rows, _ = self._run_serverless_sql(total_sql)
+        total = int(total_rows[0]["cnt"]) if total_rows else pts
+        truncated = " (showing first 5,000)" if total > 5000 else ""
+        ans = f"Found {total:,} {label} in ZIP {zip_code}{truncated}." if total else f"No {label} found in ZIP {zip_code}."
+        map_data = {"type": "FeatureCollection", "features": features, "_marker_size": "small"} if features else None
+        return GeoResponse(answer=ans, map_data=map_data, sources=["serverless-sql"])
 
     def _extract_city_state(self, question: str):
         q = question.strip()
@@ -1633,7 +1666,7 @@ class RealAgent:
     def _handle_zip_ranking(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
         q = question.lower()
         d = intent_data or {}
-        layer = d.get("layer") or ("boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities")
+        layer = d.get("layer") or ("boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities")
         limit_m = re.search(r"\btop\s+(\d+)\b", q)
         limit_n = int(limit_m.group(1)) if limit_m else 10
         city, state = self._extract_city_state(question)
@@ -1658,21 +1691,23 @@ class RealAgent:
 
         # Fetch ZIP boundary polygons for map display
         zip_codes = [r["zip_code"] for r in rows]
-        zip_list = ",".join(f"'{z}'" for z in zip_codes)
-        bdy_rows, _ = self._run_serverless_sql(
+        zip_list = ",".join(f"\'{z}\'" for z in zip_codes)
+        bdy_rows, bdy_err = self._run_serverless_sql(
             f"SELECT ZIP, GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP IN ({zip_list})"
         )
         zip_geoms = {}
         if bdy_rows:
             for br in bdy_rows:
-                if br.get("GEOMETRY"):
+                geom_str = br.get("GEOMETRY")
+                if geom_str and geom_str != "None":
                     try:
-                        raw_rings = json.loads(br["GEOMETRY"])
+                        raw_rings = json.loads(geom_str)
                         normalized = _norm_rings(raw_rings)
                         coords = [_convert_ring(ring) for ring in normalized]
-                        zip_geoms[br["ZIP"]] = {"type": "Polygon", "coordinates": coords}
+                        if coords and coords[0]:
+                            zip_geoms[br["ZIP"]] = {"type": "Polygon", "coordinates": coords}
                     except Exception:
-                        pass
+                        continue
 
         # Build response
         features = []
@@ -1897,6 +1932,7 @@ class RealAgent:
             min_lat, max_lat, min_lon, max_lon = bbox
             point_sql += f" AND LATITUDE BETWEEN {min_lat - 0.1} AND {max_lat + 0.1}"
             point_sql += f" AND LONGITUDE BETWEEN {min_lon - 0.1} AND {max_lon + 0.1}"
+        point_sql += " LIMIT 50000"
 
         result, error = self._run_containment(
             polygon_wkts=polygon_wkts,
