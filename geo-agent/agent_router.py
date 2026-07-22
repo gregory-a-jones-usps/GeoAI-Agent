@@ -619,10 +619,10 @@ def _tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = Non
                 end_m = re.search(r"[,.]\s*([A-Za-z]{2})\s*$", question) or re.search(r"\b([A-Za-z]{2})\s*$", question)
                 if end_m and end_m.group(1).upper() in _STATE_ABBRS:
                     state_tok = end_m.group(1).upper()
-        # Check if this is weather+containment (facilities within alert)
+        # If user mentions a layer (facilities/boxes), they want containment.
+        # If just asking about weather/alerts, show the alert listing.
         has_layer_kw = any(w in q for w in _LAYER_KW)
-        has_containment = any(w in q for w in ["within", "inside", "in the", "affected by", "impacted by"])
-        if has_layer_kw and has_containment:
+        if has_layer_kw:
             layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "facilities"
             return {"intent": "weather_containment", "layer": layer, "state": state_tok}
         return {"intent": "weather_alerts", "state": state_tok}
@@ -1867,12 +1867,19 @@ class RealAgent:
                 polygon_wkts.append(_geojson_to_wkt(geom))
                 polygon_props.append({"_alert_event": props.get("event", "Alert")})
                 sev = props.get("severity", "Unknown")
+                # Extract time range in concise format
+                onset = (props.get("onset") or "")[:16].replace("T", " ")
+                expires = (props.get("expires") or "")[:16].replace("T", " ")
+                time_range = f"{onset} to {expires}" if onset and expires else (onset or expires or "")
                 polygon_features.append({
                     "type": "Feature",
                     "geometry": geom,
                     "properties": {
                         "event": props.get("event", "Alert"),
-                        "headline": props.get("headline", ""),
+                        "severity": sev,
+                        "urgency": props.get("urgency", ""),
+                        "time_range": time_range,
+                        "area": (props.get("areaDesc") or "")[:120],
                         "_severity": sev,
                         "_color": sev_colors.get(sev, "#6b7280"),
                     },
