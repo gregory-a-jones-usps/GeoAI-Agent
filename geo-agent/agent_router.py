@@ -1113,6 +1113,37 @@ class RealAgent:
                 self._sql_warehouse_id = None
         return self._sql_warehouse_id
 
+    def _run_serverless_sql(self, sql: str) -> tuple:
+        """Run SQL via Statement API (serverless). Returns (rows_as_dicts, error)."""
+        import time as _time
+        wh_id = self._get_sql_warehouse_id()
+        if not wh_id:
+            return None, "No SQL warehouse available"
+        try:
+            stmt = self.w.api_client.do("POST", "/api/2.0/sql/statements", body={
+                "statement": sql,
+                "warehouse_id": wh_id,
+                "wait_timeout": "50s",
+                "disposition": "INLINE",
+                "format": "JSON_ARRAY",
+            })
+            status = stmt.get("status", {}).get("state", "")
+            stmt_id = stmt.get("statement_id", "")
+            for _ in range(30):
+                if status in ("SUCCEEDED", "FAILED", "CANCELED", "CLOSED"):
+                    break
+                _time.sleep(2)
+                stmt = self.w.api_client.do("GET", f"/api/2.0/sql/statements/{stmt_id}")
+                status = stmt.get("status", {}).get("state", "")
+            if status != "SUCCEEDED":
+                error_msg = stmt.get("status", {}).get("error", {}).get("message", status)
+                return None, f"SQL failed: {error_msg}"
+            columns = [c["name"] for c in stmt.get("manifest", {}).get("schema", {}).get("columns", [])]
+            rows = stmt.get("result", {}).get("data_array", [])
+            return [dict(zip(columns, row)) for row in rows], None
+        except Exception as e:
+            return None, f"SQL error: {str(e)[:300]}"
+
     def _generate_sa_polygon(
         self,
         origin_addr: str,
@@ -1490,25 +1521,11 @@ class RealAgent:
         sql = f"SELECT COUNT(*) AS cnt FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}'"
         label = cfg["label"]
 
-        code = _build_code(
-            _SPARK_SETUP,
-            "import json",
-            "try:",
-            f"    cnt = spark.sql({json.dumps(sql)}).first()['cnt']",
-            f"    print(json.dumps({{'zip_code': {json.dumps(zip_code)}, 'count': int(cnt), 'label': {json.dumps(label)}, 'method': 'zip_match'}}))",
-            "except Exception as e:",
-            "    print(json.dumps({'error': str(e)}))",
-        )
-        data, error = self._run_cluster_code(code)
+        rows, error = self._run_serverless_sql(sql)
         if error:
-            return GeoResponse(answer=f"Containment query error: {error}", map_data=None, sources=["geo_analytics"])
-        try:
-            parsed = json.loads(data)
-            if "error" in parsed:
-                return GeoResponse(answer=f"Containment error: {parsed['error']}", map_data=None, sources=["geo_analytics"])
-            return GeoResponse(answer=f"There are {parsed.get('count', 0)} {parsed.get('label', label)} with ZIP {zip_code}.", map_data=None, sources=["geoanalytics-engine"])
-        except Exception:
-            return GeoResponse(answer=f"Containment raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
+            return GeoResponse(answer=f"ZIP count error: {error}", map_data=None, sources=["serverless-sql"])
+        cnt = int(rows[0]["cnt"]) if rows else 0
+        return GeoResponse(answer=f"There are {cnt} {label} with ZIP {zip_code}.", map_data=None, sources=["serverless-sql"])
 
     def _handle_spatial_lookup(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
         q = question.lower()
@@ -1632,40 +1649,46 @@ class RealAgent:
         sql = base + f" GROUP BY {cfg['zip_col']} ORDER BY cnt DESC LIMIT {limit_n}"
         label = cfg["label"]
 
-        code = _build_code(
-            _SPARK_SETUP,
-            "import json",
-            _NORM_RINGS_FN,
-            f"top_rows = spark.sql({json.dumps(sql)}).collect()",
-            "results = []",
-            "features = []",
-            "rank = 1",
-            "for r in top_rows:",
-            "    zip_code = str(r['zip_code'])",
-            "    cnt = int(r['cnt'])",
-            "    results.append({'rank': rank, 'zip_code': zip_code, 'count': cnt})",
-            f"    bdy = spark.sql(f\"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP = '{{zip_code}}' LIMIT 1\").collect()",
-            "    if bdy and bdy[0][0]:",
-            "        geom = _convert_geom_display(json.loads(bdy[0][0]))",
-            "        features.append({'type': 'Feature', 'geometry': geom, 'properties': {'zip_code': zip_code, 'count': cnt, 'rank': rank}})",
-            "    rank += 1",
-            "print(json.dumps({'type': 'FeatureCollection', 'features': features, 'properties': {'heat_fill': True}, 'results': results}))",
-        )
-        data, error = self._run_cluster_code(code)
+        rows, error = self._run_serverless_sql(sql)
         if error:
-            return GeoResponse(answer=f"ZIP ranking error: {error}", map_data=None, sources=["geo_analytics"])
-        try:
-            parsed = json.loads(data)
-            results = parsed.get("results", [])
-            if not results:
-                scope = ", ".join([v for v in [city, state] if v]) or "the requested area"
-                return GeoResponse(answer=f"No ZIP rankings found for {scope}.", map_data=None, sources=["geo_analytics"])
-            scope = ", ".join([v for v in [city, state] if v]) or "all locations"
-            lines = [f"Top {len(results)} ZIPs in {scope} by {label}:"]
-            lines += [f"{r['rank']}. {r['zip_code']} — {r['count']} {label}" for r in results]
-            return GeoResponse(answer="\n".join(lines), map_data=parsed if parsed.get("features") else None, sources=["geo_analytics"])
-        except Exception:
-            return GeoResponse(answer=f"ZIP ranking raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
+            return GeoResponse(answer=f"ZIP ranking error: {error}", map_data=None, sources=["serverless-sql"])
+        if not rows:
+            scope = ", ".join([v for v in [city, state] if v]) or "the requested area"
+            return GeoResponse(answer=f"No ZIP rankings found for {scope}.", map_data=None, sources=["serverless-sql"])
+
+        # Fetch ZIP boundary polygons for map display
+        zip_codes = [r["zip_code"] for r in rows]
+        zip_list = ",".join(f"'{z}'" for z in zip_codes)
+        bdy_rows, _ = self._run_serverless_sql(
+            f"SELECT ZIP, GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP IN ({zip_list})"
+        )
+        zip_geoms = {}
+        if bdy_rows:
+            for br in bdy_rows:
+                if br.get("GEOMETRY"):
+                    try:
+                        raw_rings = json.loads(br["GEOMETRY"])
+                        normalized = _norm_rings(raw_rings)
+                        coords = [_convert_ring(ring) for ring in normalized]
+                        zip_geoms[br["ZIP"]] = {"type": "Polygon", "coordinates": coords}
+                    except Exception:
+                        pass
+
+        # Build response
+        features = []
+        results = []
+        for rank, r in enumerate(rows, 1):
+            zc = r["zip_code"]
+            cnt = int(r["cnt"])
+            results.append({"rank": rank, "zip_code": zc, "count": cnt})
+            if zc in zip_geoms:
+                features.append({"type": "Feature", "geometry": zip_geoms[zc], "properties": {"zip_code": zc, "count": cnt, "rank": rank}})
+
+        scope = ", ".join([v for v in [city, state] if v]) or "all locations"
+        lines = [f"Top {len(results)} ZIPs in {scope} by {label}:"]
+        lines += [f"{r['rank']}. {r['zip_code']} \u2014 {r['count']} {label}" for r in results]
+        map_data = {"type": "FeatureCollection", "features": features, "properties": {"heat_fill": True}, "results": results} if features else None
+        return GeoResponse(answer="\n".join(lines), map_data=map_data, sources=["serverless-sql"])
 
     def _handle_weather_alerts(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
         import urllib.request
