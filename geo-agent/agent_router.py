@@ -1037,79 +1037,50 @@ class RealAgent:
         point_sql: str,
         polygon_features: Optional[List[Dict[str, Any]]] = None,
     ) -> tuple:
-        """Generic point-in-polygon containment.
+        """Generic point-in-polygon containment via GIS-GAE spatial join on cluster."""
+        if not polygon_wkts:
+            return {"type": "FeatureCollection", "features": [], "count": 0}, None
 
-        1. Fetch candidate points via SQL Statement API (serverless — no cluster needed)
-        2. Do containment in Python (ray-casting, milliseconds)
-        """
-        import time as _time
-
-        # Step 1: Fetch points using SQL Statement API (serverless, always warm)
+        code = _build_code(
+            _SPARK_SETUP,
+            _GA_SETUP,
+            "import json",
+            "from geoanalytics.sql import functions as ga_fn",
+            f"polygon_wkts = {json.dumps(polygon_wkts)}",
+            f"polygon_props = {json.dumps(polygon_props)}",
+            f"point_sql = {json.dumps(point_sql)}",
+            "points = spark.sql(point_sql)",
+            "polys = spark.createDataFrame([(i, wkt) for i, wkt in enumerate(polygon_wkts)], ['poly_id', 'wkt'])",
+            "polys = polys.withColumn('poly_geom', ga_fn.poly_from_text('wkt'))",
+            "points = points.withColumn('pt_geom', ga_fn.point('LONGITUDE', 'LATITUDE'))",
+            "joined = points.crossJoin(polys).where(ga_fn.contains('poly_geom', 'pt_geom'))",
+            "rows = joined.collect()",
+            "seen = set()",
+            "features = []",
+            "for row in rows:",
+            "    d = row.asDict()",
+            "    lbl = str(d.get('label', ''))",
+            "    lat = d.get('LATITUDE'); lon = d.get('LONGITUDE')",
+            "    if lat in (None, '') or lon in (None, '') or lbl in seen:",
+            "        continue",
+            "    seen.add(lbl)",
+            "    props = {k: v for k, v in d.items() if k not in ('LATITUDE', 'LONGITUDE', 'pt_geom', 'poly_geom', 'wkt')}",
+            "    props['_marker_size'] = 'small'",
+            "    poly_id = d.get('poly_id')",
+            "    if poly_id is not None and int(poly_id) < len(polygon_props):",
+            "        props.update(polygon_props[int(poly_id)])",
+            "    features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(float(lon), 6), round(float(lat), 6)]}, 'properties': props})",
+            f"poly_features = {json.dumps(polygon_features or [])}",
+            "result = {'type': 'FeatureCollection', 'features': features + poly_features, 'count': len(seen)}",
+            "print(json.dumps(result))",
+        )
+        data, error = self._run_cluster_code(code)
+        if error:
+            return None, f"Containment error: {error}"
         try:
-            stmt = self.w.api_client.do("POST", "/api/2.0/sql/statements", body={
-                "statement": point_sql,
-                "warehouse_id": self._get_sql_warehouse_id(),
-                "wait_timeout": "50s",
-                "disposition": "INLINE",
-                "format": "JSON_ARRAY",
-            })
-            # Poll if needed
-            status = stmt.get("status", {}).get("state", "")
-            stmt_id = stmt.get("statement_id", "")
-            for _ in range(30):
-                if status in ("SUCCEEDED", "FAILED", "CANCELED", "CLOSED"):
-                    break
-                _time.sleep(2)
-                stmt = self.w.api_client.do("GET", f"/api/2.0/sql/statements/{stmt_id}")
-                status = stmt.get("status", {}).get("state", "")
-
-            if status != "SUCCEEDED":
-                error_msg = stmt.get("status", {}).get("error", {}).get("message", status)
-                return None, f"SQL query failed: {error_msg}"
-
-            # Parse results
-            columns = [c["name"] for c in stmt.get("manifest", {}).get("schema", {}).get("columns", [])]
-            rows = stmt.get("result", {}).get("data_array", [])
-            candidate_points = []
-            for row in rows:
-                pt = dict(zip(columns, row))
-                candidate_points.append(pt)
-
-        except Exception as e:
-            return None, f"SQL fetch error: {str(e)[:500]}"
-
-        # Step 2: Python-side containment (fast ray-casting)
-        if not candidate_points or not polygon_features:
-            features = []
-            for pt in candidate_points:
-                lat = pt.get("LATITUDE"); lon = pt.get("LONGITUDE")
-                if lat and lon:
-                    props = {k: v for k, v in pt.items() if k not in ("LATITUDE", "LONGITUDE")}
-                    features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(float(lon), 6), round(float(lat), 6)]}, "properties": props})
-            result = {"type": "FeatureCollection", "features": features, "count": len(features)}
-            return result, None
-
-        seen = set()
-        features = []
-        for pt in candidate_points:
-            lat = pt.get("LATITUDE"); lon = pt.get("LONGITUDE")
-            lbl = pt.get("label", "")
-            if not lat or not lon or lbl in seen:
-                continue
-            for i, poly_feat in enumerate(polygon_features):
-                geom = poly_feat.get("geometry")
-                if geom and _point_in_geojson(float(lon), float(lat), geom):
-                    seen.add(lbl)
-                    props = {k: v for k, v in pt.items() if k not in ("LATITUDE", "LONGITUDE")}
-                    props["_marker_size"] = "small"
-                    if i < len(polygon_props):
-                        props.update(polygon_props[i])
-                    features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(float(lon), 6), round(float(lat), 6)]}, "properties": props})
-                    break
-
-        result_features = features + (polygon_features or [])
-        result = {"type": "FeatureCollection", "features": result_features, "count": len(seen)}
-        return result, None
+            return json.loads(data), None
+        except Exception:
+            return None, f"Containment parse error: {str(data)[:500]}"
 
     def _get_sql_warehouse_id(self):
         """Get SQL warehouse ID - env var first, then discover."""
@@ -1932,7 +1903,7 @@ class RealAgent:
             min_lat, max_lat, min_lon, max_lon = bbox
             point_sql += f" AND LATITUDE BETWEEN {min_lat - 0.1} AND {max_lat + 0.1}"
             point_sql += f" AND LONGITUDE BETWEEN {min_lon - 0.1} AND {max_lon + 0.1}"
-        point_sql += " LIMIT 50000"
+        point_sql += " LIMIT 200000"
 
         result, error = self._run_containment(
             polygon_wkts=polygon_wkts,
