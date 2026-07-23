@@ -72,251 +72,26 @@ _point_in_polygon = point_in_polygon
 _point_in_geojson = point_in_geojson
 
 
-def _extract_location_candidate(text: Optional[str]) -> Optional[Dict[str, str]]:
-    raw = " ".join((text or "").split())
-    if not raw:
-        return None
+# ---------------------------------------------------------------------------
+# Import intent classification and location resolution
+# ---------------------------------------------------------------------------
+from intent import (
+    extract_location_candidate,
+    resolve_location_from_history,
+    resolve_location_text,
+    extract_sa_params_from_history,
+    classify_intent,
+    tier1_classify,
+)
 
-    out: Dict[str, str] = {}
-    zip_m = re.search(r"\bZIP(?:\s+code)?\s*(?:is|:)?\s*(\d{5})\b", raw, re.I) or re.search(r"\b(\d{5})\b", raw)
-    if zip_m:
-        out["zip_code"] = zip_m.group(1)
+# Backward-compatible aliases for handler code
+_extract_location_candidate = extract_location_candidate
+_resolve_location_from_history = resolve_location_from_history
+_resolve_location_text = resolve_location_text
+_extract_sa_params_from_history = extract_sa_params_from_history
+_classify_intent = classify_intent
+_tier1_classify = tier1_classify
 
-    city_state_m = re.search(r"\bin\s+([A-Za-z .'-]+?),\s*([A-Z]{2})\b", raw) or re.search(r"\b([A-Za-z .'-]+?),\s*([A-Z]{2})\b", raw)
-    if city_state_m:
-        out["city"] = city_state_m.group(1).strip(" ,.")
-        out["state"] = city_state_m.group(2).upper()
-        out["city_state"] = f"{out['city']}, {out['state']}"
-
-    addr = None
-    located_m = re.search(r"\blocated at\s+(.+?)(?:\s+with\b|,\s*ZIP\b|\.\s|\.$|$)", raw, re.I)
-    if located_m:
-        addr = located_m.group(1).strip(" ,.")
-    if not addr:
-        addr_m = re.search(
-            r"\b\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9.'#\/\- ]+?\b(?:RD|ROAD|ST|STREET|AVE|AVENUE|BLVD|BOULEVARD|DR|DRIVE|LN|LANE|HWY|HIGHWAY|PKWY|PARKWAY|PL|PLACE|CT|COURT|CIR|CIRCLE|WAY|TRL|TRAIL)\b(?:,\s*[A-Za-z .'-]+)?(?:,\s*[A-Z]{2})?(?:\s+\d{5})?",
-            raw,
-            re.I,
-        )
-        if addr_m:
-            addr = addr_m.group(0).strip(" ,.")
-
-    if addr:
-        full_addr = addr
-        city_state = out.get("city_state")
-        if city_state and city_state.lower() not in full_addr.lower():
-            full_addr = f"{full_addr}, {city_state}"
-        zip_code = out.get("zip_code")
-        if zip_code and not re.search(rf"\b{zip_code}\b", full_addr):
-            full_addr = f"{full_addr} {zip_code}"
-        out["address"] = full_addr.strip()
-
-    return out or None
-
-
-def _resolve_location_from_history(history: Optional[List[Dict[str, str]]]) -> Optional[Dict[str, str]]:
-    for msg in reversed(list(history or [])):
-        if not isinstance(msg, dict):
-            continue
-        candidate = _extract_location_candidate(msg.get("content"))
-        if candidate:
-            return candidate
-    return None
-
-
-def _resolve_location_text(text: Optional[str], history: Optional[List[Dict[str, str]]]) -> tuple[str, Optional[Dict[str, str]]]:
-    cleaned = (text or "").strip()
-    if not _is_vague_location_text(cleaned):
-        return cleaned, None
-    candidate = _resolve_location_from_history(history)
-    if not candidate:
-        return cleaned, None
-    resolved = candidate.get("address") or candidate.get("city_state") or candidate.get("zip_code") or cleaned
-    return str(resolved), candidate
-
-
-def _extract_sa_params_from_history(history: Optional[List[Dict[str, str]]]) -> Optional[Dict[str, str]]:
-    """Parse prior assistant messages for SA response patterns to recover origin and break values.
-    Matches patterns like:
-      'Service area (5,10 min) from ZIP 38118'
-      'Service area (5,10 min) from 4155 E HOLMES RD, Memphis, TN 38118'
-    """
-    for msg in reversed(list(history or [])):
-        if not isinstance(msg, dict):
-            continue
-        content = msg.get("content") or ""
-        # Match the standard SA response format
-        m = re.search(r"Service area\s*\(([\d,]+)\s*min\)\s*from\s+(.+?)(?:\.|$)", content, re.I)
-        if m:
-            return {"breaks": m.group(1).strip(), "origin": m.group(2).strip()}
-        # Also match nearest SA format: "Service area (5,10,15 min) from FACILITY — nearest to ..."
-        m = re.search(r"Service area\s*\(([\d,]+)\s*min\)\s*from\s+(.+?)\s*[—\-]", content, re.I)
-        if m:
-            return {"breaks": m.group(1).strip(), "origin": m.group(2).strip()}
-    return None
-
-
-def _classify_intent(question: str, history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-    tier1 = _tier1_classify(question, history=history)
-    if tier1:
-        return tier1
-    q = question.lower()
-    if re.search(r"\btop\s+\d*\s*zips?\b", q) or any(w in q for w in ["rank zip", "ranking zip"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
-        return {"intent": "zip_ranking", "layer": layer}
-    if any(w in q for w in ["inside zip", "within zip", "in zip"]) and any(w in q for w in ["count", "how many"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
-        return {"intent": "zip_count", "layer": layer}
-    if re.search(r"\b(nearest|closest)\b", q):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
-        return {"intent": "nearest", "layer": layer}
-    if any(w in q for w in _BDY_KW):
-        zip_m = re.search(r"\b(\d{5})\b", question)
-        if zip_m:
-            return {"intent": "boundary", "boundary_type": "zip", "boundary_value": zip_m.group(1)}
-    # Layer keyword + ZIP code → zip count/lookup
-    zip_m = re.search(r"\b(\d{5})\b", question)
-    if zip_m and any(w in q for w in _LAYER_KW):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
-        return {"intent": "zip_count", "layer": layer, "zip_code": zip_m.group(1)}
-    return {"intent": "genie"}
-
-
-def _tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = None) -> Optional[Dict[str, Any]]:
-    q = question.lower()
-
-    # SA containment: "show facilities in that service area", "what's inside the 5 min ring"
-    # Use word-boundary matching for "in"/"within"/"inside" to avoid false positives (e.g., "min" containing "in")
-    _has_containment_word = any(kw in q for kw in _SA_CONTAIN_KW) or (
-        re.search(r"\b(?:in|within|inside)\b", q) and any(w in q for w in ["service area", "drive time", "ring", "isochrone"])
-    )
-    # Also require a layer keyword (facilities/boxes) to distinguish from plain SA generation requests
-    _has_layer_word = any(w in q for w in _LAYER_KW)
-    if _has_containment_word and _has_layer_word:
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
-        # Try to get a specific break from the question (e.g., "in the 5 min service area")
-        breaks_m = re.search(r"(\d+)\s*(?:min|minute)", q, re.I)
-        specific_break = breaks_m.group(1) if breaks_m else None
-        # Look for SA params in history
-        sa_params = _extract_sa_params_from_history(history)
-        if sa_params:
-            origin = sa_params.get("origin", "")
-            breaks = specific_break or sa_params.get("breaks", "5")
-            return {"intent": "sa_containment", "layer": layer, "origin": origin, "breaks": breaks}
-        # No history SA context — check if question has enough info on its own
-        origin_m = re.search(r"(?:from|around|for)\s+(.+?)(?:\s+(?:in|within|inside)\b|$)", question.strip(), re.I)
-        if origin_m:
-            return {"intent": "sa_containment", "layer": layer, "origin": origin_m.group(1).strip(), "breaks": specific_break or "5"}
-
-    if "geocode" in q:
-        return {"intent": "geocode", "address": re.sub(r"\bgeocode\b", "", question, flags=re.I).strip()}
-    if re.search(r"\bwhere\s+is\b", q) and not re.search(r"\b\d{5}\b", q):
-        addr = re.sub(r"\bwhere\s+is\b", "", question, flags=re.I).strip().rstrip("?")
-        if addr and not any(w in q for w in ["boundary", "border", "county", "district", "state"]):
-            return {"intent": "geocode", "address": addr}
-
-    if re.search(r"\b(route|directions?)\s+(from|to)\b", q):
-        return {"intent": "route"}
-    if re.search(r"\b(?:travel|driving)\s+(?:time|distance)\s+from\s+.+?\s+to\s+.+$", q):
-        return {"intent": "route"}
-    if re.search(r"\b(?:how\s+far|how\s+long|travel\s+time|travel\s+distance|driving\s+time|driving\s+distance)\s+(?:to\s+drive|is\s+the\s+drive|driving|from)\b", q):
-        return {"intent": "route"}
-    if re.search(r"\bdrive\s+from\b", q):
-        return {"intent": "route"}
-    if re.search(r"\b(?:driving|travel)\s+(?:distance|time)\s+between\b", q):
-        return {"intent": "route"}
-    if re.search(r"\bdistance\s+between\b", q):
-        return {"intent": "route"}
-
-    if any(w in q for w in _WEATHER_KW) or re.search(r"\b(noaa|nws)\b", q):
-        # Parse state — check full names FIRST, then 2-letter abbreviations
-        state_tok = None
-        for name, abbr in sorted(_STATE_NAMES.items(), key=lambda kv: len(kv[0]), reverse=True):
-            if re.search(rf"\b{name}\b", q):
-                state_tok = abbr
-                break
-        if not state_tok:
-            _AMBIGUOUS_ABBRS = {"IN", "OR", "ME", "OH", "OK", "HI", "ID"}
-            for tok in re.findall(r"\b[A-Za-z]{2}\b", question):
-                upper = tok.upper()
-                if upper in _STATE_ABBRS and upper not in _AMBIGUOUS_ABBRS:
-                    state_tok = upper
-                    break
-            if not state_tok:
-                end_m = re.search(r"[,.]\s*([A-Za-z]{2})\s*$", question) or re.search(r"\b([A-Za-z]{2})\s*$", question)
-                if end_m and end_m.group(1).upper() in _STATE_ABBRS:
-                    state_tok = end_m.group(1).upper()
-        # If user mentions a layer (facilities/boxes), they want containment.
-        # If just asking about weather/alerts, show the alert listing.
-        has_layer_kw = any(w in q for w in _LAYER_KW)
-        if has_layer_kw:
-            layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
-            return {"intent": "weather_containment", "layer": layer, "state": state_tok}
-        return {"intent": "weather_alerts", "state": state_tok}
-
-    zip_m = re.search(r"\b(\d{5})\b", question)
-
-    if zip_m and any(w in q for w in _SA_KW + ["minute", " min"]):
-        breaks_m = re.search(r"(\d+(?:\s*(?:,|and)\s*\d+)*)\s*(?:min|minute)", q, re.I)
-        breaks = re.sub(r"\s*(?:and|,)\s*", ",", breaks_m.group(1)).strip() if breaks_m else "5,10,15"
-        return {"intent": "service_area", "zip_code": zip_m.group(1), "breaks": breaks}
-
-    if not zip_m and any(w in q for w in _SA_KW):
-        breaks_m = re.search(r"(\d+(?:\s*(?:,|and)\s*\d+)*)\s*(?:min|minute)", q, re.I)
-        breaks = re.sub(r"\s*(?:and|,)\s*", ",", breaks_m.group(1)).strip() if breaks_m else "5,10,15"
-        if "nearest" in q:
-            loc_m = re.search(r"nearest\s+(?:facility|facilities|office|plant|station)?\s*(?:to\s+)?(.+?)$", question.strip(), re.I)
-            if loc_m:
-                return {"intent": "nearest_service_area", "reference_location": loc_m.group(1).strip(), "breaks": breaks}
-        origin_m = re.search(r"(?:from|around|for)\s+(.+?)$", question.strip(), re.I)
-        if origin_m:
-            return {"intent": "service_area", "origin": origin_m.group(1).strip(), "breaks": breaks}
-
-    if re.search(r"\b(nearest|closest)\b", q):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
-        ref_m = re.search(r"\b(?:nearest|closest)\b.*?\b(?:to|from|near)\s+(.+?)$", question, re.I)
-        if ref_m:
-            return {"intent": "nearest", "layer": layer, "reference_location": ref_m.group(1).strip()}
-
-    has_bdy = any(w in q for w in _BDY_KW)
-    if zip_m and has_bdy and not any(w in q for w in _ALL_LAYER_WORDS):
-        return {"intent": "boundary", "boundary_type": "zip", "boundary_value": zip_m.group(1)}
-
-    state_hit = None
-    for tok in re.findall(r"\b[A-Za-z]{2}\b", question):
-        if tok.upper() in _STATE_ABBRS:
-            state_hit = tok.upper()
-            break
-    if not state_hit:
-        for name, abbr in _STATE_NAMES.items():
-            if name in q:
-                state_hit = abbr
-                break
-    if state_hit and not zip_m and has_bdy and not any(w in q for w in _ALL_LAYER_WORDS):
-        return {"intent": "boundary", "boundary_type": "state", "boundary_value": state_hit}
-
-    county_m = re.search(r"\b(\w+(?:\s+\w+)?)\s+county\b", q)
-    if county_m and has_bdy:
-        cwords = [w for w in county_m.group(1).strip().split()]
-        while len(cwords) > 1 and cwords[0] in {"show", "the", "a", "an", "display", "find", "map", "of", "for", "in", "outline", "polygon", "boundary", "get"}:
-            cwords = cwords[1:]
-        cname = " ".join(cwords)
-        if cname not in {"the", "a", "any", "each", "every"}:
-            return {"intent": "boundary", "boundary_type": "county", "boundary_value": cname, "state": state_hit or ""}
-
-    if re.search(r"\btop\s+\d*\s*zips?\b", q) or any(w in q for w in ["rank zip", "ranking zip"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
-        return {"intent": "zip_ranking", "layer": layer}
-
-    if zip_m and any(w in q for w in ["inside", "within", "in zip"]) and any(w in q for w in ["count", "how many"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
-        return {"intent": "zip_count", "layer": layer, "zip_code": zip_m.group(1)}
-
-    if zip_m and any(w in q for w in _LAYER_KW):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
-        return {"intent": "spatial_lookup", "layer": layer, "zip_code": zip_m.group(1)}
-
-    return None
 
 
 class RealAgent:
@@ -991,94 +766,57 @@ class RealAgent:
             return GeoResponse(answer=f"Nearest service area raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
 
     def _handle_nearest(self, question: str, intent_data: Dict[str, Any] = None, history=None) -> GeoResponse:
-        """Find nearest N facilities/boxes/businesses to a reference location."""
         d = intent_data or {}
         ref_loc = d.get("reference_location") or d.get("origin") or ""
-        layer = d.get("layer") or ("boxes" if any(w in question.lower() for w in ["box", "collection", "cpms"]) else "businesses" if any(w in question.lower() for w in ["business", "company", "store", "restaurant"]) else "facilities")
+        layer = d.get("layer") or ("boxes" if any(w in question.lower() for w in ["box", "collection", "cpms"]) else "facilities")
         if not ref_loc:
             m = re.search(r"\b(?:nearest|closest)\b.*?\b(?:to|from|near)\s+(.+?)$", question, re.I)
             ref_loc = m.group(1).strip() if m else ""
         if not ref_loc:
-            return GeoResponse(answer="Please specify a reference location for the nearest search.", map_data=None, sources=["serverless-sql"])
-
-        count_m = re.search(r"\b(?:nearest|closest)\s+(\d+)", question, re.I)
-        top_n = int(count_m.group(1)) if count_m else 1
+            return GeoResponse(answer="Please specify a reference location for the nearest search.", map_data=None, sources=["geoanalytics-engine"])
 
         cfg = _LAYER_CONFIG[layer]
+        sql = f"SELECT {cfg['select_fields_minimal']} FROM {cfg['table']} WHERE {cfg['non_zero_filter']}"
         kind = cfg["label"]
 
-        ref_lat, ref_lon = None, None
-        zip_m = re.search(r"\b(\d{5})\b", ref_loc)
-        if zip_m:
-            zip_code = zip_m.group(1)
-            centroid_sql = f"SELECT AVG(LATITUDE) AS lat, AVG(LONGITUDE) AS lon FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']}"
-            rows, err = self._run_serverless_sql(centroid_sql)
-            if rows and rows[0].get("lat"):
-                ref_lat, ref_lon = float(rows[0]["lat"]), float(rows[0]["lon"])
-            else:
-                return GeoResponse(answer=f"No {kind} found in ZIP {zip_code}.", map_data=None, sources=["serverless-sql"])
-        else:
-            gc_code = _build_code(
-                _SPARK_SETUP, _GA_SETUP, "import json",
-                "from geoanalytics.tools import Geocode",
-                f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
-                f"ref_df = spark.createDataFrame([({json.dumps(ref_loc)},)], ['address'])",
-                "gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal')",
-                "rows = gc.run(ref_df).collect()",
-                "matched = [r for r in rows if r['Status'] in ('M', 'T')]",
-                "if matched:",
-                "    print(json.dumps({'lat': matched[0]['geocode_location'].y, 'lon': matched[0]['geocode_location'].x}))",
-                "else:",
-                "    print(json.dumps({'error': 'Could not geocode reference location'}))",
-            )
-            data, error = self._run_cluster_code(gc_code)
-            if error:
-                return GeoResponse(answer=f"Could not geocode '{ref_loc}': {error}", map_data=None, sources=["geoanalytics-engine"])
-            try:
-                gc_result = json.loads(data)
-                if "error" in gc_result:
-                    return GeoResponse(answer=f"Could not geocode '{ref_loc}'.", map_data=None, sources=["geoanalytics-engine"])
-                ref_lat, ref_lon = gc_result["lat"], gc_result["lon"]
-            except Exception:
-                return GeoResponse(answer=f"Geocode parse error for '{ref_loc}'.", map_data=None, sources=["debug"])
-
-        nearest_sql = f"""
-            SELECT {cfg['select_fields']},
-                   (3959 * ACOS(
-                       LEAST(1.0, COS(RADIANS({ref_lat})) * COS(RADIANS(LATITUDE)) *
-                       COS(RADIANS(LONGITUDE) - RADIANS({ref_lon})) +
-                       SIN(RADIANS({ref_lat})) * SIN(RADIANS(LATITUDE)))
-                   )) AS distance_mi
-            FROM {cfg['table']}
-            WHERE {cfg['non_zero_filter']}
-            ORDER BY distance_mi
-            LIMIT {top_n}
-        """
-        rows, error = self._run_serverless_sql(nearest_sql)
+        code = _build_code(
+            _SPARK_SETUP,
+            _GA_SETUP,
+            "import json",
+            "from geoanalytics.tools import Geocode",
+            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
+            f"query_sql = {json.dumps(sql)}",
+            f"ref_df = spark.createDataFrame([({json.dumps(ref_loc)},)], ['address'])",
+            _HAV_FN,
+            "try:",
+            "    gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal')",
+            "    rows = gc.run(ref_df).collect()",
+            "    matched = [r for r in rows if r['Status'] == 'M']",
+            "    if not matched:",
+            "        print(json.dumps({'error': 'Could not geocode reference location'}))",
+            "        raise SystemExit()",
+            "    ref_lon = matched[0]['geocode_location'].x",
+            "    ref_lat = matched[0]['geocode_location'].y",
+            "    candidates = spark.sql(query_sql).collect()",
+            "    best = min(candidates, key=lambda r: _hav(ref_lat, ref_lon, float(r['LATITUDE']), float(r['LONGITUDE'])))",
+            "    dist = round(_hav(ref_lat, ref_lon, float(best['LATITUDE']), float(best['LONGITUDE'])), 2)",
+            "    print(json.dumps({'label': best['label'], 'address': best['address'], 'distance_mi': dist, 'coordinates': [float(best['LONGITUDE']), float(best['LATITUDE'])]}))",
+            "except SystemExit:",
+            "    pass",
+            "except Exception as e:",
+            "    print(json.dumps({'error': str(e)}))",
+        )
+        data, error = self._run_cluster_code(code)
         if error:
-            return GeoResponse(answer=f"Nearest search error: {error}", map_data=None, sources=["serverless-sql"])
-        if not rows:
-            return GeoResponse(answer=f"No {kind} found.", map_data=None, sources=["serverless-sql"])
-
-        features = []
-        results_text = []
-        for i, r in enumerate(rows, 1):
-            lat, lon = float(r["LATITUDE"]), float(r["LONGITUDE"])
-            dist = round(float(r["distance_mi"]), 2)
-            label = r.get("label", "")
-            address = r.get("address", "")
-            props = {k: v for k, v in r.items() if k not in ("LATITUDE", "LONGITUDE", "distance_mi")}
-            props["distance_mi"] = dist
-            features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(lon, 6), round(lat, 6)]}, "properties": props})
-            results_text.append(f"{i}. {label} \u2014 {dist} mi" + (f" ({address})" if address else ""))
-
-        if top_n == 1:
-            ans = f"Nearest {kind} to {ref_loc}: {results_text[0].split('. ', 1)[1]}"
-        else:
-            ans = f"Nearest {top_n} {kind} to {ref_loc}:\n" + "\n".join(results_text)
-
-        map_data = {"type": "FeatureCollection", "features": features} if features else None
-        return GeoResponse(answer=ans, map_data=map_data, sources=["serverless-sql"])
+            return GeoResponse(answer=f"Nearest search error: {error}", map_data=None, sources=["geoanalytics-engine"])
+        try:
+            parsed = json.loads(data)
+            if isinstance(parsed, dict) and "error" in parsed:
+                return GeoResponse(answer=f"Nearest search error: {parsed['error']}", map_data=None, sources=["geoanalytics-engine"])
+            map_data = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": parsed.get("coordinates", [0, 0])}, "properties": {"label": parsed.get("label"), "address": parsed.get("address"), "distance_mi": parsed.get("distance_mi")}}]}
+            return GeoResponse(answer=f"Nearest {kind} to {ref_loc}: {parsed.get('label')} ({parsed.get('distance_mi')} mi)", map_data=map_data, sources=["geoanalytics-engine"])
+        except Exception:
+            return GeoResponse(answer=f"Nearest raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
 
     def _handle_boundary(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
         d = intent_data or {}
@@ -1651,7 +1389,7 @@ _INTENT_HANDLERS = {
     "nearest_service_area": lambda ra, q, d, h: ra._handle_nearest_service_area(q, d, history=h),
     "nearest":              lambda ra, q, d, h: ra._handle_nearest(q, d, history=h),
     "boundary":             lambda ra, q, d, h: ra._handle_boundary(q, d),
-    "zip_count":            lambda ra, q, d, h: ra._handle_zip_count(q, d),
+    "zip_count":            lambda ra, q, d, h: ra._handle_spatial_lookup(q, d),
     "spatial_lookup":       lambda ra, q, d, h: ra._handle_spatial_lookup(q, d),
     "zip_ranking":          lambda ra, q, d, h: ra._handle_zip_ranking(q, d),
     "weather_containment":  lambda ra, q, d, h: ra._handle_weather_containment(q, d),
