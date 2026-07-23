@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from config import (
     SA_CONTAIN_KW, SA_KW, BDY_KW, WEATHER_KW, LAYER_KW, ALL_LAYER_WORDS,
-    STATE_NAMES, STATE_ABBRS, is_vague_location_text,
+    STATE_NAMES, STATE_ABBRS, is_vague_location_text, classify_layer,
 )
 
 
@@ -109,13 +109,13 @@ def classify_intent(question: str, history: Optional[List[Dict[str, str]]] = Non
         return tier1
     q = question.lower()
     if re.search(r"\btop\s+\d*\s*zips?\b", q) or any(w in q for w in ["rank zip", "ranking zip"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+        layer = classify_layer(question)
         return {"intent": "zip_ranking", "layer": layer}
     if any(w in q for w in ["inside zip", "within zip", "in zip"]) and any(w in q for w in ["count", "how many"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+        layer = classify_layer(question)
         return {"intent": "zip_count", "layer": layer}
     if re.search(r"\b(nearest|closest)\b", q):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+        layer = classify_layer(question)
         return {"intent": "nearest", "layer": layer}
     if any(w in q for w in BDY_KW):
         zip_m = re.search(r"\b(\d{5})\b", question)
@@ -124,7 +124,7 @@ def classify_intent(question: str, history: Optional[List[Dict[str, str]]] = Non
     # Layer keyword + ZIP code -> zip count/lookup
     zip_m = re.search(r"\b(\d{5})\b", question)
     if zip_m and any(w in q for w in LAYER_KW):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+        layer = classify_layer(question)
         return {"intent": "zip_count", "layer": layer, "zip_code": zip_m.group(1)}
     return {"intent": "genie"}
 
@@ -139,7 +139,7 @@ def tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = None
     )
     _has_layer_word = any(w in q for w in LAYER_KW)
     if _has_containment_word and _has_layer_word:
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+        layer = classify_layer(question)
         breaks_m = re.search(r"(\d+)\s*(?:min|minute)", q, re.I)
         specific_break = breaks_m.group(1) if breaks_m else None
         sa_params = extract_sa_params_from_history(history)
@@ -190,7 +190,7 @@ def tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = None
                     state_tok = end_m.group(1).upper()
         has_layer_kw = any(w in q for w in LAYER_KW)
         if has_layer_kw:
-            layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+            layer = classify_layer(question)
             return {"intent": "weather_containment", "layer": layer, "state": state_tok}
         return {"intent": "weather_alerts", "state": state_tok}
 
@@ -213,7 +213,7 @@ def tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = None
             return {"intent": "service_area", "origin": origin_m.group(1).strip(), "breaks": breaks}
 
     if re.search(r"\b(nearest|closest)\b", q):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+        layer = classify_layer(question)
         ref_m = re.search(r"\b(?:nearest|closest)\b.*?\b(?:to|from|near)\s+(.+?)$", question, re.I)
         if ref_m:
             return {"intent": "nearest", "layer": layer, "reference_location": ref_m.group(1).strip()}
@@ -245,15 +245,15 @@ def tier1_classify(question: str, history: Optional[List[Dict[str, str]]] = None
             return {"intent": "boundary", "boundary_type": "county", "boundary_value": cname, "state": state_hit or ""}
 
     if re.search(r"\btop\s+\d*\s*zips?\b", q) or any(w in q for w in ["rank zip", "ranking zip"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+        layer = classify_layer(question)
         return {"intent": "zip_ranking", "layer": layer}
 
     if zip_m and any(w in q for w in ["inside", "within", "in zip"]) and any(w in q for w in ["count", "how many"]):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+        layer = classify_layer(question)
         return {"intent": "zip_count", "layer": layer, "zip_code": zip_m.group(1)}
 
     if zip_m and any(w in q for w in LAYER_KW):
-        layer = "boxes" if any(w in q for w in ["box", "collection", "cpms"]) else "businesses" if any(w in q for w in ["business", "company", "companies", "store", "stores", "restaurant", "shop"]) else "facilities"
+        layer = classify_layer(question)
         return {"intent": "spatial_lookup", "layer": layer, "zip_code": zip_m.group(1)}
 
     return None

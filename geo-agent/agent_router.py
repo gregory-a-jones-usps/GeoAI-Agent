@@ -30,49 +30,6 @@ from spatial_utils import (
 )
 
 # ---------------------------------------------------------------------------
-# Backward-compatible aliases (used throughout handler code below)
-# ---------------------------------------------------------------------------
-_GA_AUTH_FILE = GA_AUTH_FILE
-_GA_LOCATOR_PATH = GA_LOCATOR_PATH
-_GA_NETWORK_PATH = GA_NETWORK_PATH
-_GA_QUARANTINE = GA_QUARANTINE
-_TBL_ZIP5 = TBL_ZIP5
-_TBL_FACILITIES = TBL_FACILITIES
-_TBL_BOXES = TBL_BOXES
-_GENIE_SPACES = GENIE_SPACES
-_LAYER_CONFIG = LAYER_CONFIG
-_LAYER_KW = LAYER_KW
-_SA_CONTAIN_KW = SA_CONTAIN_KW
-_SA_KW = SA_KW
-_BDY_KW = BDY_KW
-_WEATHER_KW = WEATHER_KW
-_ALL_LAYER_WORDS = ALL_LAYER_WORDS
-_SA_COLORS = SA_COLORS
-_STATE_ABBRS = STATE_ABBRS
-_STATE_NAMES = STATE_NAMES
-_BOUNDARY_TABLES = BOUNDARY_TABLES
-_SPARK_SETUP = SPARK_SETUP
-_GA_SETUP = GA_SETUP
-_NORM_RINGS_FN = NORM_RINGS_FN
-_HAV_FN = HAV_FN
-_ZIP_BROWSE_RE = ZIP_BROWSE_RE
-_ZIP_PRESENT_RE = ZIP_PRESENT_RE
-_VAGUE_LOCATION_RE = VAGUE_LOCATION_RE
-_build_code = build_code
-_classify_layer = classify_layer
-_get_layer_config = get_layer_config
-_containment_point_sql = containment_point_sql
-_parse_state_token = parse_state_token
-_is_vague_location_text = is_vague_location_text
-_norm_rings = norm_rings
-_convert_ring = convert_ring
-_geojson_to_wkt = geojson_to_wkt
-_bbox_from_geojson_features = bbox_from_geojson_features
-_point_in_polygon = point_in_polygon
-_point_in_geojson = point_in_geojson
-
-
-# ---------------------------------------------------------------------------
 # Import intent classification and location resolution
 # ---------------------------------------------------------------------------
 from intent import (
@@ -83,16 +40,6 @@ from intent import (
     classify_intent,
     tier1_classify,
 )
-
-# Backward-compatible aliases for handler code
-_extract_location_candidate = extract_location_candidate
-_resolve_location_from_history = resolve_location_from_history
-_resolve_location_text = resolve_location_text
-_extract_sa_params_from_history = extract_sa_params_from_history
-_classify_intent = classify_intent
-_tier1_classify = tier1_classify
-
-
 
 class RealAgent:
     name = "RealAgent (Recovered Router)"
@@ -109,7 +56,7 @@ class RealAgent:
     def _warmup(self):
         try:
             self._ensure_context()
-            self._run_cluster_code(_build_code(_SPARK_SETUP, "spark.sql('SELECT 1').collect()", "print('warm')"))
+            self._run_cluster_code(build_code(SPARK_SETUP, "spark.sql('SELECT 1').collect()", "print('warm')"))
             self._warm = True
         except Exception:
             pass
@@ -157,12 +104,12 @@ class RealAgent:
     def _handle_geocode(self, question: str) -> GeoResponse:
         address = re.sub(r"\bgeocode\b", "", question, flags=re.I)
         address = re.sub(r"\s*Context:.*$", "", address).strip()
-        code = _build_code(
-            _SPARK_SETUP,
-            _GA_SETUP,
+        code = build_code(
+            SPARK_SETUP,
+            GA_SETUP,
             "import json",
             "from geoanalytics.tools import Geocode",
-            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
+            f"locator_path = {json.dumps(GA_LOCATOR_PATH)}",
             f"df = spark.createDataFrame([({json.dumps(address)},)], ['address'])",
             "try:",
             "    result = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal').run(df)",
@@ -230,16 +177,16 @@ class RealAgent:
                 sources=["geoanalytics-engine"],
             )
 
-        code = _build_code(
-            _SPARK_SETUP,
-            _GA_SETUP,
+        code = build_code(
+            SPARK_SETUP,
+            GA_SETUP,
             "import json",
             "from geoanalytics.tools import Geocode, CreateRoutes",
             "from geoanalytics.sql import functions as ga_fn",
             "from pyspark.sql import functions as F",
             "from pyspark.sql import Row",
-            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
-            f"network_path = {json.dumps(_GA_NETWORK_PATH)}",
+            f"locator_path = {json.dumps(GA_LOCATOR_PATH)}",
+            f"network_path = {json.dumps(GA_NETWORK_PATH)}",
             f"addresses_df = spark.createDataFrame([({json.dumps(origin)},), ({json.dumps(dest)},)], ['address'])",
             "try:",
             "    geocoded = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal').run(addresses_df)",
@@ -317,14 +264,14 @@ class RealAgent:
             return GeoResponse(answer="Please specify an origin — a ZIP code or an address/place name.", map_data=None, sources=["geoanalytics-engine"])
 
         if zip_code:
-            zip_geom_sql = f"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP = '{zip_code}'"
+            zip_geom_sql = f"SELECT GEOMETRY FROM {TBL_ZIP5} WHERE ZIP = '{zip_code}'"
             origin_lines = [
                 f"rows = spark.sql({json.dumps(zip_geom_sql)}).collect()",
                 "if not rows or not rows[0][0]:",
                 "    print(json.dumps({'error': 'ZIP not found'}))",
                 "    raise SystemExit()",
-                "raw_rings = _norm_rings(json.loads(rows[0][0]))",
-                "outer = _convert_ring(raw_rings[0])",
+                "raw_rings = norm_rings(json.loads(rows[0][0]))",
+                "outer = convert_ring(raw_rings[0])",
                 "origin_lon = float(sum(pt[0] for pt in outer) / len(outer))",
                 "origin_lat = float(sum(pt[1] for pt in outer) / len(outer))",
                 f"origin_label = {json.dumps(f'ZIP {zip_code}')}",
@@ -334,7 +281,7 @@ class RealAgent:
         else:
             origin_addr_sql = origin_addr.replace("'", "''")
             facility_lookup_sql = (
-                f"SELECT LOCALE_NAME, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} "
+                f"SELECT LOCALE_NAME, LATITUDE, LONGITUDE FROM {TBL_FACILITIES} "
                 f"WHERE UPPER(LOCALE_NAME) LIKE UPPER('%{origin_addr_sql}%') AND LATITUDE IS NOT NULL LIMIT 1"
             )
             origin_lines = [
@@ -358,18 +305,18 @@ class RealAgent:
             geocode_import = "from geoanalytics.tools import Geocode"
             origin_label = origin_addr
 
-        code = _build_code(
-            _SPARK_SETUP,
-            _GA_SETUP,
+        code = build_code(
+            SPARK_SETUP,
+            GA_SETUP,
             "import json",
             "import re",
             "from geoanalytics.tools import CreateServiceAreas",
             geocode_import,
             "from geoanalytics.sql import functions as ga_fn",
             "from pyspark.sql import functions as F",
-            _NORM_RINGS_FN,
-            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
-            f"network_path = {json.dumps(_GA_NETWORK_PATH)}",
+            NORM_RINGS_FN,
+            f"locator_path = {json.dumps(GA_LOCATOR_PATH)}",
+            f"network_path = {json.dumps(GA_NETWORK_PATH)}",
             f"break_minutes = [{break_minutes}]",
             "try:",
             *[f"    {line}" for line in origin_lines],
@@ -379,7 +326,7 @@ class RealAgent:
             "    sa.setTravelMode('Driving Time')",
             "    sa.setCutoffs([float(b) for b in break_minutes], unit='minutes')",
             "    result = sa.run(point_df)",
-            f"    colors = {json.dumps(_SA_COLORS)}",
+            f"    colors = {json.dumps(SA_COLORS)}",
             "    features = [{'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(origin_lon, 6), round(origin_lat, 6)]}, 'properties': {'label': origin_label, 'type': 'origin'}}]",
             "    geom_col = 'service_area_polygon' if 'service_area_polygon' in result.columns else 'service_area_geometry'",
             "    sa_rows = result.withColumn('sa_wkt', ga_fn.as_text(geom_col)).withColumn('sa_geojson', F.expr('ST_AsGeoJSON(ST_GeomFromWKT(sa_wkt))')).collect()",
@@ -423,13 +370,74 @@ class RealAgent:
         point_sql: str,
         polygon_features: Optional[List[Dict[str, Any]]] = None,
     ) -> tuple:
-        """Generic point-in-polygon containment via GIS-GAE spatial join on cluster."""
+        """Generic point-in-polygon containment.
+
+        Prefer local filtering in the app process when GeoJSON polygon features are
+        available. This avoids oversized cluster stdout payloads when many points
+        match a polygon, which can truncate JSON and break parsing.
+        """
         if not polygon_wkts:
             return {"type": "FeatureCollection", "features": [], "count": 0}, None
 
-        code = _build_code(
-            _SPARK_SETUP,
-            _GA_SETUP,
+        polygon_features = polygon_features or []
+        geo_polys = []
+        for idx, feat in enumerate(polygon_features):
+            geom = feat.get("geometry") if isinstance(feat, dict) else None
+            if isinstance(geom, dict) and geom.get("type") in ("Polygon", "MultiPolygon"):
+                geo_polys.append((idx, geom))
+
+        if geo_polys:
+            rows, error = self._run_serverless_sql(point_sql)
+            if error:
+                return None, f"Containment error: {error}"
+
+            seen = set()
+            features = []
+            count = 0
+            for d in rows or []:
+                lat = d.get("LATITUDE")
+                lon = d.get("LONGITUDE")
+                if lat in (None, "") or lon in (None, ""):
+                    continue
+                try:
+                    lat_f = float(lat)
+                    lon_f = float(lon)
+                except Exception:
+                    continue
+
+                matched_idx = None
+                for poly_idx, geom in geo_polys:
+                    if point_in_geojson(lon_f, lat_f, geom):
+                        matched_idx = poly_idx
+                        break
+                if matched_idx is None:
+                    continue
+
+                dedupe_key = (str(d.get("label", "")), round(lon_f, 6), round(lat_f, 6))
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                count += 1
+
+                props = {k: v for k, v in d.items() if k not in ("LATITUDE", "LONGITUDE")}
+                props["_marker_size"] = "small"
+                if matched_idx < len(polygon_props):
+                    props.update(polygon_props[matched_idx])
+                features.append({
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [round(lon_f, 6), round(lat_f, 6)]},
+                    "properties": props,
+                })
+
+            return {
+                "type": "FeatureCollection",
+                "features": features + polygon_features,
+                "count": count,
+            }, None
+
+        code = build_code(
+            SPARK_SETUP,
+            GA_SETUP,
             "import json",
             "from geoanalytics.sql import functions as ga_fn",
             f"polygon_wkts = {json.dumps(polygon_wkts)}",
@@ -445,18 +453,20 @@ class RealAgent:
             "features = []",
             "for row in rows:",
             "    d = row.asDict()",
-            "    lbl = str(d.get('label', ''))",
             "    lat = d.get('LATITUDE'); lon = d.get('LONGITUDE')",
-            "    if lat in (None, '') or lon in (None, '') or lbl in seen:",
+            "    if lat in (None, '') or lon in (None, ''):",
             "        continue",
-            "    seen.add(lbl)",
+            "    dedupe_key = (str(d.get('label', '')), round(float(lon), 6), round(float(lat), 6))",
+            "    if dedupe_key in seen:",
+            "        continue",
+            "    seen.add(dedupe_key)",
             "    props = {k: v for k, v in d.items() if k not in ('LATITUDE', 'LONGITUDE', 'pt_geom', 'poly_geom', 'wkt')}",
             "    props['_marker_size'] = 'small'",
             "    poly_id = d.get('poly_id')",
             "    if poly_id is not None and int(poly_id) < len(polygon_props):",
             "        props.update(polygon_props[int(poly_id)])",
             "    features.append({'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(float(lon), 6), round(float(lat), 6)]}, 'properties': props})",
-            f"poly_features = {json.dumps(polygon_features or [])}",
+            f"poly_features = {json.dumps(polygon_features)}",
             "result = {'type': 'FeatureCollection', 'features': features + poly_features, 'count': len(seen)}",
             "print(json.dumps(result))",
         )
@@ -534,7 +544,7 @@ class RealAgent:
         The returned WKT can then be fed to _run_containment().
         """
         # Resolve vague origins from history
-        origin_addr, history_loc = _resolve_location_text(origin_addr, history)
+        origin_addr, history_loc = resolve_location_text(origin_addr, history)
         if not origin_addr and history_loc:
             origin_addr = history_loc.get("address") or history_loc.get("city_state") or history_loc.get("zip_code") or ""
 
@@ -550,14 +560,14 @@ class RealAgent:
 
         # Build origin resolution code
         if zip_code:
-            zip_geom_sql = f"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP = '{zip_code}'"
+            zip_geom_sql = f"SELECT GEOMETRY FROM {TBL_ZIP5} WHERE ZIP = '{zip_code}'"
             origin_lines = [
                 f"rows = spark.sql({json.dumps(zip_geom_sql)}).collect()",
                 "if not rows or not rows[0][0]:",
                 "    print(json.dumps({'error': 'ZIP not found'}))",
                 "    raise SystemExit()",
-                "raw_rings = _norm_rings(json.loads(rows[0][0]))",
-                "outer = _convert_ring(raw_rings[0])",
+                "raw_rings = norm_rings(json.loads(rows[0][0]))",
+                "outer = convert_ring(raw_rings[0])",
                 "origin_lon = float(sum(pt[0] for pt in outer) / len(outer))",
                 "origin_lat = float(sum(pt[1] for pt in outer) / len(outer))",
                 f"origin_label = {json.dumps(f'ZIP {zip_code}')}",
@@ -566,7 +576,7 @@ class RealAgent:
         else:
             origin_addr_sql = origin_addr.replace("'", "''")
             facility_lookup_sql = (
-                f"SELECT LOCALE_NAME, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} "
+                f"SELECT LOCALE_NAME, LATITUDE, LONGITUDE FROM {TBL_FACILITIES} "
                 f"WHERE UPPER(LOCALE_NAME) LIKE UPPER('%{origin_addr_sql}%') AND LATITUDE IS NOT NULL LIMIT 1"
             )
             origin_lines = [
@@ -589,18 +599,18 @@ class RealAgent:
             ]
             geocode_import = "from geoanalytics.tools import Geocode"
 
-        code = _build_code(
-            _SPARK_SETUP,
-            _GA_SETUP,
+        code = build_code(
+            SPARK_SETUP,
+            GA_SETUP,
             "import json",
             "import re",
             "from geoanalytics.tools import CreateServiceAreas",
             geocode_import,
             "from geoanalytics.sql import functions as ga_fn",
             "from pyspark.sql import functions as F",
-            _NORM_RINGS_FN,
-            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
-            f"network_path = {json.dumps(_GA_NETWORK_PATH)}",
+            NORM_RINGS_FN,
+            f"locator_path = {json.dumps(GA_LOCATOR_PATH)}",
+            f"network_path = {json.dumps(GA_NETWORK_PATH)}",
             f"break_val = {float(break_val)}",
             "try:",
             *[f"    {line}" for line in origin_lines],
@@ -644,7 +654,7 @@ class RealAgent:
         d = intent_data or {}
         origin_addr = d.get("origin") or ""
         break_val = d.get("breaks", "5")
-        layer = d.get("layer") or _classify_layer(question, d)
+        layer = d.get("layer") or classify_layer(question, d)
 
         # Use only the smallest break value for containment
         break_single = break_val.split(",")[0].strip() if "," in break_val else break_val
@@ -660,16 +670,22 @@ class RealAgent:
             return GeoResponse(answer=f"SA containment error: {error}", map_data=None, sources=["geoanalytics-engine"])
 
         # Phase 2: Generic containment — find points inside the polygon
-        point_sql = _containment_point_sql(layer)
+        point_sql = containment_point_sql(layer)
         sa_feature = {
             "type": "Feature",
             "geometry": json.loads(sa_geojson_str),
             "properties": {
                 "service_area_label": f"{break_single} minute service area",
                 "break_minutes": break_single,
-                "color": _SA_COLORS.get(break_single, "#22c55e"),
+                "color": SA_COLORS.get(break_single, "#22c55e"),
             },
         }
+        bbox = bbox_from_geojson_features([sa_feature])
+        if bbox:
+            min_lat, max_lat, min_lon, max_lon = bbox
+            point_sql += f" AND LATITUDE BETWEEN {min_lat - 0.05} AND {max_lat + 0.05}"
+            point_sql += f" AND LONGITUDE BETWEEN {min_lon - 0.05} AND {max_lon + 0.05}"
+        point_sql += " LIMIT 50000"
         result, error = self._run_containment(
             polygon_wkts=[sa_wkt],
             polygon_props=[{"break_minutes": break_single}],
@@ -679,7 +695,7 @@ class RealAgent:
         if error:
             return GeoResponse(answer=f"SA containment error: {error}", map_data=None, sources=["geoanalytics-engine"])
 
-        kind = _LAYER_CONFIG[layer]["label"]
+        kind = LAYER_CONFIG[layer]["label"]
         count = result.get("count", 0)
         return GeoResponse(
             answer=f"Found {count} {kind} within the {break_single}-minute service area from {origin_label}.",
@@ -690,27 +706,27 @@ class RealAgent:
     def _handle_nearest_service_area(self, question: str, intent_data: Dict[str, Any] = None, history: Optional[List[Dict[str, str]]] = None) -> GeoResponse:
         d = intent_data or {}
         ref_loc = d.get("reference_location") or d.get("origin") or ""
-        ref_loc, history_loc = _resolve_location_text(ref_loc, history)
+        ref_loc, history_loc = resolve_location_text(ref_loc, history)
         if not ref_loc and history_loc:
             ref_loc = history_loc.get("address") or history_loc.get("city_state") or history_loc.get("zip_code") or ""
         break_minutes = d.get("breaks", "5,10,15")
         if not ref_loc:
             return GeoResponse(answer="Please specify a location for the nearest facility search.", map_data=None, sources=["geoanalytics-engine"])
 
-        code = _build_code(
-            _SPARK_SETUP,
-            _GA_SETUP,
+        code = build_code(
+            SPARK_SETUP,
+            GA_SETUP,
             "import json",
             "import re",
             "from geoanalytics.tools import CreateServiceAreas, Geocode",
             "from geoanalytics.sql import functions as ga_fn",
             "from pyspark.sql import functions as F",
-            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
-            f"network_path = {json.dumps(_GA_NETWORK_PATH)}",
+            f"locator_path = {json.dumps(GA_LOCATOR_PATH)}",
+            f"network_path = {json.dumps(GA_NETWORK_PATH)}",
             f"break_minutes = [{break_minutes}]",
             f"ref_df = spark.createDataFrame([({json.dumps(ref_loc)},)], ['address'])",
-            f"fac_sql = {json.dumps(f'SELECT LOCALE_NAME, FACILITY_TYPE, LATITUDE, LONGITUDE FROM {_TBL_FACILITIES} WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL')}",
-            _HAV_FN,
+            f"fac_sql = {json.dumps(f'SELECT LOCALE_NAME, FACILITY_TYPE, LATITUDE, LONGITUDE FROM {TBL_FACILITIES} WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL')}",
+            HAV_FN,
             "try:",
             "    gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields('Minimal')",
             "    geo_rows = gc.run(ref_df).collect()",
@@ -732,7 +748,7 @@ class RealAgent:
             "    sa.setTravelMode('Driving Time')",
             "    sa.setCutoffs([float(b) for b in break_minutes], unit='minutes')",
             "    result = sa.run(point_df)",
-            f"    colors = {json.dumps(_SA_COLORS)}",
+            f"    colors = {json.dumps(SA_COLORS)}",
             "    features = [{'type': 'Feature', 'geometry': {'type': 'Point', 'coordinates': [round(origin_lon, 6), round(origin_lat, 6)]}, 'properties': {'label': origin_label, 'type': 'origin'}}]",
             "    geom_col = 'service_area_polygon' if 'service_area_polygon' in result.columns else 'service_area_geometry'",
             "    sa_rows = result.withColumn('sa_wkt', ga_fn.as_text(geom_col)).withColumn('sa_geojson', F.expr('ST_AsGeoJSON(ST_GeomFromWKT(sa_wkt))')).collect()",
@@ -775,19 +791,19 @@ class RealAgent:
         if not ref_loc:
             return GeoResponse(answer="Please specify a reference location for the nearest search.", map_data=None, sources=["geoanalytics-engine"])
 
-        cfg = _LAYER_CONFIG[layer]
+        cfg = LAYER_CONFIG[layer]
         sql = f"SELECT {cfg['select_fields_minimal']} FROM {cfg['table']} WHERE {cfg['non_zero_filter']}"
         kind = cfg["label"]
 
-        code = _build_code(
-            _SPARK_SETUP,
-            _GA_SETUP,
+        code = build_code(
+            SPARK_SETUP,
+            GA_SETUP,
             "import json",
             "from geoanalytics.tools import Geocode",
-            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
+            f"locator_path = {json.dumps(GA_LOCATOR_PATH)}",
             f"query_sql = {json.dumps(sql)}",
             f"ref_df = spark.createDataFrame([({json.dumps(ref_loc)},)], ['address'])",
-            _HAV_FN,
+            HAV_FN,
             "try:",
             "    gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal')",
             "    rows = gc.run(ref_df).collect()",
@@ -830,7 +846,7 @@ class RealAgent:
         if not bval:
             return GeoResponse(answer="Please specify a boundary name or ZIP code.", map_data=None, sources=["geo_analytics"])
 
-        entry = _BOUNDARY_TABLES.get(btype, _BOUNDARY_TABLES["zip"])
+        entry = BOUNDARY_TABLES.get(btype, BOUNDARY_TABLES["zip"])
         table = entry["table"]
         label_col = entry["label"]
         geom_col = entry["geom"]
@@ -841,10 +857,10 @@ class RealAgent:
         boundary_sql = f"SELECT {label_col}, {geom_col} FROM {table} WHERE {where} LIMIT 1"
 
         if geom_col == "GEOMETRY":
-            code = _build_code(
-                _SPARK_SETUP,
+            code = build_code(
+                SPARK_SETUP,
                 "import json",
-                _NORM_RINGS_FN,
+                NORM_RINGS_FN,
                 "try:",
                 f"    rows = spark.sql({json.dumps(boundary_sql)}).collect()",
                 f"    if not rows or not rows[0]['{geom_col}']:",
@@ -857,8 +873,8 @@ class RealAgent:
                 "    print(json.dumps({'error': str(e)}))",
             )
         else:
-            code = _build_code(
-                _SPARK_SETUP,
+            code = build_code(
+                SPARK_SETUP,
                 "import json",
                 "try:",
                 f"    rows = spark.sql({json.dumps(boundary_sql)}).collect()",
@@ -894,7 +910,7 @@ class RealAgent:
         if not zip_code:
             return GeoResponse(answer="Please include a ZIP code.", map_data=None, sources=["geo_analytics"])
 
-        cfg = _LAYER_CONFIG[layer]
+        cfg = LAYER_CONFIG[layer]
         sql = f"SELECT COUNT(*) AS cnt FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}'"
         label = cfg["label"]
 
@@ -924,7 +940,7 @@ class RealAgent:
             else:
                 layer = "facilities"
 
-        cfg = _LAYER_CONFIG.get(layer, _LAYER_CONFIG["facilities"])
+        cfg = LAYER_CONFIG.get(layer, LAYER_CONFIG["facilities"])
         # Query points (limit 5000 for display)
         point_sql = f"SELECT {cfg['select_fields']} FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']} LIMIT 5000"
         rows, error = self._run_serverless_sql(point_sql)
@@ -933,12 +949,12 @@ class RealAgent:
 
         features = []
         # ZIP boundary polygon
-        bdy_rows, _ = self._run_serverless_sql(f"SELECT GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP = '{zip_code}'")
+        bdy_rows, _ = self._run_serverless_sql(f"SELECT GEOMETRY FROM {TBL_ZIP5} WHERE ZIP = '{zip_code}'")
         if bdy_rows and bdy_rows[0].get("GEOMETRY"):
             try:
                 raw_rings = json.loads(bdy_rows[0]["GEOMETRY"])
-                normalized = _norm_rings(raw_rings)
-                coords = [_convert_ring(ring) for ring in normalized]
+                normalized = norm_rings(raw_rings)
+                coords = [convert_ring(ring) for ring in normalized]
                 if coords and coords[0]:
                     features.append({"type": "Feature", "geometry": {"type": "Polygon", "coordinates": coords}, "properties": {"ZIP": zip_code}})
             except Exception:
@@ -986,34 +1002,34 @@ class RealAgent:
                 if parts:
                     city = parts[0] or None
                 if len(parts) > 1:
-                    state = _parse_state_token(parts[-1])
+                    state = parse_state_token(parts[-1])
             else:
                 tokens = location.split()
                 if tokens:
-                    state = _parse_state_token(tokens[-1])
+                    state = parse_state_token(tokens[-1])
                     if state:
                         city = " ".join(tokens[:-1]).strip() or None
                     else:
                         loc_l = location.lower()
-                        for name, abbr in sorted(_STATE_NAMES.items(), key=lambda kv: len(kv[0]), reverse=True):
+                        for name, abbr in sorted(STATE_NAMES.items(), key=lambda kv: len(kv[0]), reverse=True):
                             if loc_l.endswith(name):
                                 state = abbr
                                 city = location[:-len(name)].strip(" ,") or None
                                 break
                         if not state:
-                            state = _parse_state_token(location)
+                            state = parse_state_token(location)
                             if not state:
                                 city = location.strip() or None
 
         if not state:
-            for name, abbr in sorted(_STATE_NAMES.items(), key=lambda kv: len(kv[0]), reverse=True):
+            for name, abbr in sorted(STATE_NAMES.items(), key=lambda kv: len(kv[0]), reverse=True):
                 if re.search(rf"\b{name}\b", q, re.I):
                     state = abbr
                     break
         # Common English words that happen to match state abbreviations — exclude from fallback
         _AMBIGUOUS_WORDS = {"in", "or", "me", "hi", "oh", "ok", "id", "ma", "pa", "la", "de", "al"}
         if not state:
-            state = next((w.upper() for w in re.findall(r"\b[A-Za-z]{2}\b", q) if w.upper() in _STATE_ABBRS and w.lower() not in _AMBIGUOUS_WORDS), None)
+            state = next((w.upper() for w in re.findall(r"\b[A-Za-z]{2}\b", q) if w.upper() in STATE_ABBRS and w.lower() not in _AMBIGUOUS_WORDS), None)
 
         if city:
             city = re.sub(r"\b(top|zip|zips|by|count|collection|box|boxes|facility|facilities)\b", "", city, flags=re.I)
@@ -1028,7 +1044,7 @@ class RealAgent:
         limit_n = int(limit_m.group(1)) if limit_m else 10
         city, state = self._extract_city_state(question)
 
-        cfg = _LAYER_CONFIG[layer]
+        cfg = LAYER_CONFIG[layer]
         base = f"SELECT {cfg['zip_col']} AS zip_code, COUNT(*) AS cnt FROM {cfg['table']} WHERE {cfg['zip_col']} IS NOT NULL"
         if city:
             city_sql = city.replace("'", "''")
@@ -1050,7 +1066,7 @@ class RealAgent:
         zip_codes = [r["zip_code"] for r in rows]
         zip_list = ",".join(f"\'{z}\'" for z in zip_codes)
         bdy_rows, bdy_err = self._run_serverless_sql(
-            f"SELECT ZIP, GEOMETRY FROM {_TBL_ZIP5} WHERE ZIP IN ({zip_list})"
+            f"SELECT ZIP, GEOMETRY FROM {TBL_ZIP5} WHERE ZIP IN ({zip_list})"
         )
         zip_geoms = {}
         if bdy_rows:
@@ -1059,8 +1075,8 @@ class RealAgent:
                 if geom_str and geom_str != "None":
                     try:
                         raw_rings = json.loads(geom_str)
-                        normalized = _norm_rings(raw_rings)
-                        coords = [_convert_ring(ring) for ring in normalized]
+                        normalized = norm_rings(raw_rings)
+                        coords = [convert_ring(ring) for ring in normalized]
                         if coords and coords[0]:
                             zip_geoms[br["ZIP"]] = {"type": "Polygon", "coordinates": coords}
                     except Exception:
@@ -1166,7 +1182,7 @@ class RealAgent:
 
         d = intent_data or {}
         state = d.get("state")
-        layer = d.get("layer") or _classify_layer(question, d)
+        layer = d.get("layer") or classify_layer(question, d)
         if not state:
             _, state = self._extract_city_state(question)
 
@@ -1256,7 +1272,7 @@ class RealAgent:
             if not geom or geom.get("type") not in ("Polygon", "MultiPolygon"):
                 continue
             try:
-                polygon_wkts.append(_geojson_to_wkt(geom))
+                polygon_wkts.append(geojson_to_wkt(geom))
                 polygon_props.append({"_alert_event": props.get("event", "Alert")})
                 sev = props.get("severity", "Unknown")
                 # Extract time range in concise format
@@ -1283,8 +1299,8 @@ class RealAgent:
             return GeoResponse(answer=f"Found {len(all_features)} active alert(s) but none have polygon geometry for containment.", map_data=None, sources=["noaa-nws"])
 
         # Pre-filter points by bounding box for performance (avoid full table scan)
-        point_sql = _containment_point_sql(layer)
-        bbox = _bbox_from_geojson_features(polygon_features)
+        point_sql = containment_point_sql(layer)
+        bbox = bbox_from_geojson_features(polygon_features)
         if bbox:
             min_lat, max_lat, min_lon, max_lon = bbox
             point_sql += f" AND LATITUDE BETWEEN {min_lat - 0.1} AND {max_lat + 0.1}"
@@ -1300,7 +1316,7 @@ class RealAgent:
         if error:
             return GeoResponse(answer=f"Weather containment error: {error}", map_data=None, sources=["noaa-nws", "serverless-sql"])
 
-        kind = _LAYER_CONFIG[layer]["label"]
+        kind = LAYER_CONFIG[layer]["label"]
         count = result.get("count", 0)
         alert_count = len(polygon_wkts)
         scope = f" in {state}" if state else ""
@@ -1313,10 +1329,10 @@ class RealAgent:
     def _pick_genie_space(self, question: str) -> str:
         q = question.lower()
         if any(w in q for w in ["box", "collection box", "cpms", "blue box"]):
-            return _GENIE_SPACES["collection_boxes"]
+            return GENIE_SPACES["collection_boxes"]
         if any(w in q for w in ["delivery", "dpf", "zip9", "mailbox", "delivery point"]):
-            return _GENIE_SPACES["delivery_points"]
-        return _GENIE_SPACES["geospatial"]
+            return GENIE_SPACES["delivery_points"]
+        return GENIE_SPACES["geospatial"]
 
     def _parse_genie_response(self, status: Dict[str, Any]) -> Dict[str, Any]:
         answer = ""
@@ -1380,7 +1396,6 @@ class RealAgent:
         map_data = self._rows_to_geojson(rows, columns)
         return GeoResponse(answer=answer, map_data=map_data, sources=["genie-space"])
 
-
 _INTENT_HANDLERS = {
     "geocode":              lambda ra, q, d, h: ra._handle_geocode(q),
     "route":                lambda ra, q, d, h: ra._handle_route(q, d, history=h),
@@ -1396,7 +1411,6 @@ _INTENT_HANDLERS = {
     "weather_alerts":       lambda ra, q, d, h: ra._handle_weather_alerts(q, d),
 }
 
-
 class GISAgent:
     name = "GISAgent (Recovered Router + GeoAnalytics Engine)"
 
@@ -1406,7 +1420,7 @@ class GISAgent:
     async def handle(self, question: str, context=None, history=None) -> GeoResponse:
         loop = asyncio.get_event_loop()
         history_list = list(history or [])
-        intent_data = _classify_intent(question, history_list)
+        intent_data = classify_intent(question, history_list)
         intent = intent_data.get("intent")
         handler = _INTENT_HANDLERS.get(intent)
         if handler:
@@ -1414,9 +1428,7 @@ class GISAgent:
             return await loop.run_in_executor(None, lambda: handler(ra, question, intent_data, history_list))
         return await loop.run_in_executor(None, lambda: self._real_agent._handle_genie(question))
 
-
 _router: Optional[GISAgent] = None
-
 
 def get_router() -> GISAgent:
     global _router
