@@ -991,57 +991,94 @@ class RealAgent:
             return GeoResponse(answer=f"Nearest service area raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
 
     def _handle_nearest(self, question: str, intent_data: Dict[str, Any] = None, history=None) -> GeoResponse:
+        """Find nearest N facilities/boxes/businesses to a reference location."""
         d = intent_data or {}
         ref_loc = d.get("reference_location") or d.get("origin") or ""
-        layer = d.get("layer") or ("boxes" if any(w in question.lower() for w in ["box", "collection", "cpms"]) else "facilities")
+        layer = d.get("layer") or ("boxes" if any(w in question.lower() for w in ["box", "collection", "cpms"]) else "businesses" if any(w in question.lower() for w in ["business", "company", "store", "restaurant"]) else "facilities")
         if not ref_loc:
             m = re.search(r"\b(?:nearest|closest)\b.*?\b(?:to|from|near)\s+(.+?)$", question, re.I)
             ref_loc = m.group(1).strip() if m else ""
         if not ref_loc:
-            return GeoResponse(answer="Please specify a reference location for the nearest search.", map_data=None, sources=["geoanalytics-engine"])
+            return GeoResponse(answer="Please specify a reference location for the nearest search.", map_data=None, sources=["serverless-sql"])
+
+        count_m = re.search(r"\b(?:nearest|closest)\s+(\d+)", question, re.I)
+        top_n = int(count_m.group(1)) if count_m else 1
 
         cfg = _LAYER_CONFIG[layer]
-        sql = f"SELECT {cfg['select_fields_minimal']} FROM {cfg['table']} WHERE {cfg['non_zero_filter']}"
         kind = cfg["label"]
 
-        code = _build_code(
-            _SPARK_SETUP,
-            _GA_SETUP,
-            "import json",
-            "from geoanalytics.tools import Geocode",
-            f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
-            f"query_sql = {json.dumps(sql)}",
-            f"ref_df = spark.createDataFrame([({json.dumps(ref_loc)},)], ['address'])",
-            _HAV_FN,
-            "try:",
-            "    gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal')",
-            "    rows = gc.run(ref_df).collect()",
-            "    matched = [r for r in rows if r['Status'] == 'M']",
-            "    if not matched:",
-            "        print(json.dumps({'error': 'Could not geocode reference location'}))",
-            "        raise SystemExit()",
-            "    ref_lon = matched[0]['geocode_location'].x",
-            "    ref_lat = matched[0]['geocode_location'].y",
-            "    candidates = spark.sql(query_sql).collect()",
-            "    best = min(candidates, key=lambda r: _hav(ref_lat, ref_lon, float(r['LATITUDE']), float(r['LONGITUDE'])))",
-            "    dist = round(_hav(ref_lat, ref_lon, float(best['LATITUDE']), float(best['LONGITUDE'])), 2)",
-            "    print(json.dumps({'label': best['label'], 'address': best['address'], 'distance_mi': dist, 'coordinates': [float(best['LONGITUDE']), float(best['LATITUDE'])]}))",
-            "except SystemExit:",
-            "    pass",
-            "except Exception as e:",
-            "    print(json.dumps({'error': str(e)}))",
-        )
-        data, error = self._run_cluster_code(code)
+        ref_lat, ref_lon = None, None
+        zip_m = re.search(r"\b(\d{5})\b", ref_loc)
+        if zip_m:
+            zip_code = zip_m.group(1)
+            centroid_sql = f"SELECT AVG(LATITUDE) AS lat, AVG(LONGITUDE) AS lon FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']}"
+            rows, err = self._run_serverless_sql(centroid_sql)
+            if rows and rows[0].get("lat"):
+                ref_lat, ref_lon = float(rows[0]["lat"]), float(rows[0]["lon"])
+            else:
+                return GeoResponse(answer=f"No {kind} found in ZIP {zip_code}.", map_data=None, sources=["serverless-sql"])
+        else:
+            gc_code = _build_code(
+                _SPARK_SETUP, _GA_SETUP, "import json",
+                "from geoanalytics.tools import Geocode",
+                f"locator_path = {json.dumps(_GA_LOCATOR_PATH)}",
+                f"ref_df = spark.createDataFrame([({json.dumps(ref_loc)},)], ['address'])",
+                "gc = Geocode().setLocator(locator_path).setAddressFields('address').setOutFields(predefined_set='Minimal')",
+                "rows = gc.run(ref_df).collect()",
+                "matched = [r for r in rows if r['Status'] in ('M', 'T')]",
+                "if matched:",
+                "    print(json.dumps({'lat': matched[0]['geocode_location'].y, 'lon': matched[0]['geocode_location'].x}))",
+                "else:",
+                "    print(json.dumps({'error': 'Could not geocode reference location'}))",
+            )
+            data, error = self._run_cluster_code(gc_code)
+            if error:
+                return GeoResponse(answer=f"Could not geocode '{ref_loc}': {error}", map_data=None, sources=["geoanalytics-engine"])
+            try:
+                gc_result = json.loads(data)
+                if "error" in gc_result:
+                    return GeoResponse(answer=f"Could not geocode '{ref_loc}'.", map_data=None, sources=["geoanalytics-engine"])
+                ref_lat, ref_lon = gc_result["lat"], gc_result["lon"]
+            except Exception:
+                return GeoResponse(answer=f"Geocode parse error for '{ref_loc}'.", map_data=None, sources=["debug"])
+
+        nearest_sql = f"""
+            SELECT {cfg['select_fields']},
+                   (3959 * ACOS(
+                       LEAST(1.0, COS(RADIANS({ref_lat})) * COS(RADIANS(LATITUDE)) *
+                       COS(RADIANS(LONGITUDE) - RADIANS({ref_lon})) +
+                       SIN(RADIANS({ref_lat})) * SIN(RADIANS(LATITUDE)))
+                   )) AS distance_mi
+            FROM {cfg['table']}
+            WHERE {cfg['non_zero_filter']}
+            ORDER BY distance_mi
+            LIMIT {top_n}
+        """
+        rows, error = self._run_serverless_sql(nearest_sql)
         if error:
-            return GeoResponse(answer=f"Nearest search error: {error}", map_data=None, sources=["geoanalytics-engine"])
-        try:
-            parsed = json.loads(data)
-            if isinstance(parsed, dict) and "error" in parsed:
-                return GeoResponse(answer=f"Nearest search error: {parsed['error']}", map_data=None, sources=["geoanalytics-engine"])
-            map_data = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": parsed.get("coordinates", [0, 0])}, "properties": {"label": parsed.get("label"), "address": parsed.get("address"), "distance_mi": parsed.get("distance_mi")}}]}
-            return GeoResponse(answer=f"Nearest {kind} to {ref_loc}: {parsed.get('label')} ({parsed.get('distance_mi')} mi)", map_data=map_data, sources=["geoanalytics-engine"])
-        except Exception:
-            return GeoResponse(answer=f"Nearest raw output: {str(data)[:500]}", map_data=None, sources=["debug"])
+            return GeoResponse(answer=f"Nearest search error: {error}", map_data=None, sources=["serverless-sql"])
+        if not rows:
+            return GeoResponse(answer=f"No {kind} found.", map_data=None, sources=["serverless-sql"])
+
+        features = []
+        results_text = []
+        for i, r in enumerate(rows, 1):
+            lat, lon = float(r["LATITUDE"]), float(r["LONGITUDE"])
+            dist = round(float(r["distance_mi"]), 2)
+            label = r.get("label", "")
+            address = r.get("address", "")
+            props = {k: v for k, v in r.items() if k not in ("LATITUDE", "LONGITUDE", "distance_mi")}
+            props["distance_mi"] = dist
+            features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(lon, 6), round(lat, 6)]}, "properties": props})
+            results_text.append(f"{i}. {label} \u2014 {dist} mi" + (f" ({address})" if address else ""))
+
+        if top_n == 1:
+            ans = f"Nearest {kind} to {ref_loc}: {results_text[0].split('. ', 1)[1]}"
+        else:
+            ans = f"Nearest {top_n} {kind} to {ref_loc}:\n" + "\n".join(results_text)
+
+        map_data = {"type": "FeatureCollection", "features": features} if features else None
+        return GeoResponse(answer=ans, map_data=map_data, sources=["serverless-sql"])
 
     def _handle_boundary(self, question: str, intent_data: Dict[str, Any] = None) -> GeoResponse:
         d = intent_data or {}
