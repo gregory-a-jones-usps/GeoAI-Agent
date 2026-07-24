@@ -1062,7 +1062,7 @@ class RealAgent:
 
         pts = len([f for f in features if f.get("geometry", {}).get("type") == "Point"])
         label = cfg.get("label", layer)
-        total_sql = f"SELECT COUNT(*) AS cnt FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']}{filter_clause}"
+        total_sql = f"SELECT COUNT(*) AS cnt FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']}"
         total_rows, _ = self._run_serverless_sql(total_sql)
         total = int(total_rows[0]["cnt"]) if total_rows else pts
         truncated = " (showing first 5,000)" if total > 5000 else ""

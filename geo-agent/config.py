@@ -86,6 +86,13 @@ LAYER_CONFIG = {
         "non_zero_filter": "LATITUDE IS NOT NULL AND LATITUDE != 0 AND LONGITUDE IS NOT NULL AND LONGITUDE != 0",
         "keywords": ["business", "businesses", "company", "companies", "store", "stores", "restaurant", "shop"],
         "label": "businesses",
+        "filterable_columns": {
+            "EMPNUM": {"type": "INT", "desc": "Number of employees"},
+            "SALESVOL": {"type": "INT", "desc": "Annual sales volume in dollars"},
+            "NAICS_DESC": {"type": "STRING", "desc": "NAICS industry description (e.g. 'Full-Service Restaurants', 'Offices of Physicians')"},
+            "ESRI_CATEGORY_DESC": {"type": "STRING", "desc": "Business category (e.g. 'Restaurant', 'Medical', 'Retail')"},
+            "CONAME": {"type": "STRING", "desc": "Company/business name"},
+        },
     },
 }
 
