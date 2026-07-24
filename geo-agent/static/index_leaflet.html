@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GeoAgent</title>
+<script>if(location.hostname.includes('geo-agent-dev'))document.title='[DEV] '+document.title;</script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<!-- Esri Leaflet — exposes L.esri (tiledMapLayer, featureLayer, dynamicMapLayer, etc.) -->
+<script src="https://unpkg.com/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;display:flex;height:100vh;background:#111827;color:#e5e7eb}
+#sidebar{width:420px;display:flex;flex-direction:column;border-right:1px solid #374151}
+#header{padding:14px 18px;background:#1f2937;border-bottom:1px solid #374151;
+        display:flex;align-items:center}
+#header h1{font-size:15px;font-weight:600}
+#messages{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+.msg{padding:10px 14px;border-radius:10px;max-width:92%;font-size:13.5px;line-height:1.5;white-space:pre-wrap}
+.user{background:#1e3a5f;align-self:flex-end;border-bottom-right-radius:2px}
+.bot{background:#1f2937;border:1px solid #374151;align-self:flex-start;border-bottom-left-radius:2px}
+.bot .sources{margin-top:8px;font-size:11px;color:#9ca3af;border-top:1px solid #374151;padding-top:6px}
+.thinking{background:#1f2937;border:1px solid #374151;align-self:flex-start;border-bottom-left-radius:2px;color:#9ca3af;font-style:italic}
+.thinking .dots{display:inline-block}
+.thinking .dots::after{content:'';animation:dots 1.5s steps(4,end) infinite}
+@keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
+#input-row{padding:12px;background:#1f2937;border-top:1px solid #374151;display:flex;gap:8px}
+#q{flex:1;padding:10px 12px;border-radius:8px;border:1px solid #4b5563;
+   background:#111827;color:#e5e7eb;font-size:13px;outline:none}
+#q:focus{border-color:#06b6d4}
+button{padding:10px 18px;background:#06b6d4;color:#000;border:none;border-radius:8px;
+       cursor:pointer;font-weight:600;font-size:13px}
+button:disabled{background:#4b5563;cursor:wait}
+#map-wrap{flex:1;position:relative;display:flex;flex-direction:column}
+#map-bar{padding:6px 12px;background:#1f2937;border-bottom:1px solid #374151;
+         font-size:12px;color:#9ca3af;display:flex;justify-content:space-between;align-items:center}
+#map{flex:1}
+#legend{position:absolute;bottom:24px;right:10px;background:rgba(255,255,255,0.93);
+        border-radius:7px;padding:8px 12px;font-size:11px;color:#222;z-index:1000;
+        box-shadow:0 1px 5px rgba(0,0,0,0.25);line-height:2;display:none}
+#legend .legend-row{display:flex;align-items:center;gap:6px;white-space:nowrap}
+/* Override default markercluster styles with cyan theme */
+.marker-cluster-custom{
+  display:flex;align-items:center;justify-content:center;
+  border-radius:50%;font-weight:700;color:#000;
+  border:2.5px solid rgba(255,255,255,0.85);
+  box-shadow:0 1px 5px rgba(0,0,0,0.35);
+}
+/* Route stop markers */
+.route-stop{
+  display:flex;align-items:center;justify-content:center;
+  border-radius:50%;font-weight:700;color:#fff;
+  border:3px solid #fff;
+  box-shadow:0 2px 6px rgba(0,0,0,0.4);
+  font-size:14px;line-height:1;
+}
+.route-stop.start{background:#16a34a}
+.route-stop.end{background:#dc2626}
+/* Basemap switcher */
+#basemap-switcher{display:flex;gap:3px}
+.bm-btn{padding:3px 9px;background:#374151;color:#d1d5db;border:1px solid #4b5563;
+        border-radius:4px;cursor:pointer;font-size:11px;font-weight:500;line-height:1.6}
+.bm-btn:hover{background:#4b5563;color:#f9fafb}
+.bm-btn.active{background:#06b6d4;color:#000;border-color:#06b6d4}
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <div id="header"><h1>🌐 GeoAgent</h1></div>
+  <div id="messages">
+    <div class="msg bot">Ask me a geospatial question. I'll return an answer and show results on the map.
+
+Try:
+• "Nearest 5 facilities to 22201"
+• "Show 5 and 10 min service area from 94103"
+• "How many collection boxes are inside zip 77002?"
+• "Show me the boundary for zip 85004"
+• "Top 5 zips in Chicago, IL by collection box count"
+• "Active weather alerts in Tennessee"
+• "Travel time from USPS Headquarters to Benjamin Franklin Post Office, Washington DC"</div>
+  </div>
+  <div id="input-row">
+    <input id="q" placeholder="Ask a geospatial question..." onkeydown="if(event.key==='Enter')ask()"/>
+    <button id="btn" onclick="ask()">Ask</button>
+  </div>
+</div>
+<div id="map-wrap">
+  <div id="map-bar">
+    <span><span id="map-status">Waiting for query...</span>&nbsp;&nbsp;<span id="feat-count"></span></span>
+    <span id="basemap-switcher">
+      <button class="bm-btn active" onclick="setBasemap('osm')">Map</button>
+      <button class="bm-btn" onclick="setBasemap('imagery')">Satellite</button>
+      <button class="bm-btn" onclick="setBasemap('topo')">Topo</button>
+    </span>
+  </div>
+  <div id="map"></div>
+  <div id="legend"></div>
+</div>
+<script>
+// ── Conversation history — rolling last 10 messages (5 turns) ────────────
+const MAX_HISTORY = 10;
+let conversationHistory = [];
+let lastMapData = null;  // tracks last rendered GeoJSON for restyle_only re-renders
+let zipBrowseState = null;  // active center-out lazy ZIP browse session
+let zipBrowseLayer = null;  // Leaflet layer group for incrementally-loaded ZIP polygons
+
+function pushHistory(role, content){
+  conversationHistory.push({ role, content });
+  if(conversationHistory.length > MAX_HISTORY)
+    conversationHistory.splice(0, conversationHistory.length - MAX_HISTORY);
+}
+
+const CONUS_BOUNDS = [[24.4, -125.0], [49.4, -66.9]];
+const map = L.map('map', { maxZoom: 18 }).fitBounds(CONUS_BOUNDS);
+
+const BASEMAP_LAYERS = {
+  osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }),
+  imagery: L.esri.tiledMapLayer({
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer',
+    attribution: 'Tiles &copy; Esri &mdash; Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+  }),
+  topo: L.esri.tiledMapLayer({
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer',
+    attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ, TomTom, Intermap, iPC, USGS, FAO, NPS, NRCAN, GeoBase, Kadaster NL, Ordnance Survey, Esri Japan, METI, Esri China (Hong Kong), and the GIS User Community'
+  })
+};
+
+let currentBasemap = 'osm';
+BASEMAP_LAYERS.osm.addTo(map);
+
+function setBasemap(name) {
+  if (name === currentBasemap) return;
+  map.removeLayer(BASEMAP_LAYERS[currentBasemap]);
+  BASEMAP_LAYERS[name].addTo(map);
+  BASEMAP_LAYERS[name].bringToBack();
+  currentBasemap = name;
+  document.querySelectorAll('.bm-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+}
+
+let pointLayer = null;
+let polyLayer  = null;
+let haloLayer  = null;
+let routeStopLayer = null;
+let noaaLayer = null;
+
+const PIN_TYPES = [
+  { match: ['p&dc','pdc','processing','distribution'], color:'#1d4ed8', label:'P&DC / Processing' },
+  { match: ['post office','post_office'],              color:'#dc2626', label:'Post Office'       },
+  { match: ['collection box','collection_box','box','_box_layer'], color:'#16a34a', label:'Collection Box' },
+  { match: ['annex','adc','aadc'],                     color:'#7c3aed', label:'Annex / ADC'      },
+  { match: ['carrier','cfs','station'],                color:'#ea580c', label:'Carrier / Station' },
+];
+const DEFAULT_PIN_COLOR = '#06b6d4';
+const DEFAULT_PIN_LABEL = 'Other';
+
+function makePinSvg(color){
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 36" width="24" height="36">
+    <path d="M12 0C5.37 0 0 5.37 0 12c0 6.63 12 24 12 24S24 18.63 24 12C24 5.37 18.63 0 12 0z"
+          fill="${color}" stroke="rgba(0,0,0,0.25)" stroke-width="1"/>
+    <circle cx="12" cy="12" r="5" fill="white" opacity="0.85"/>
+  </svg>`;
+}
+
+function makeIcon(color){
+  return L.divIcon({
+    html: makePinSvg(color),
+    className: '',
+    iconSize:    [24, 36],
+    iconAnchor:  [12, 36],
+    popupAnchor: [0, -38]
+  });
+}
+
+function makeBoxSvg(color){
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 26 22" width="26" height="22">
+    <rect x="1" y="5" width="24" height="16" rx="4"
+          fill="${color}" stroke="rgba(0,0,0,0.28)" stroke-width="1.5"/>
+    <path d="M1 9 Q1 5 5 5 L21 5 Q25 5 25 9"
+          fill="${color}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/>
+    <rect x="9" y="5" width="8" height="5" rx="1" fill="rgba(255,255,255,0.3)"/>
+    <rect x="4" y="14" width="18" height="1.5" rx="0.75" fill="rgba(255,255,255,0.45)"/>
+    <circle cx="13" cy="18" r="1.5" fill="rgba(255,255,255,0.65)"/>
+  </svg>`;
+}
+
+function makeBoxIcon(color){
+  return L.divIcon({
+    html: makeBoxSvg(color),
+    className: '',
+    iconSize:    [26, 22],
+    iconAnchor:  [13, 22],
+    popupAnchor: [0, -24]
+  });
+}
+
+function makeShapeSvg(shape, color){
+  const c = color || '#06b6d4';
+  if(shape === 'square')
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><rect x="2" y="2" width="24" height="24" rx="3" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><rect x="9" y="9" width="10" height="10" fill="white" opacity="0.7"/></svg>`;
+  if(shape === 'triangle')
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><polygon points="14,1 27,26 1,26" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><polygon points="14,11 21,24 7,24" fill="white" opacity="0.6"/></svg>`;
+  if(shape === 'diamond')
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><polygon points="14,1 27,14 14,27 1,14" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><polygon points="14,8 21,14 14,20 7,14" fill="white" opacity="0.7"/></svg>`;
+  if(shape === 'star')
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><polygon points="14,1 17.5,10.5 27,10.5 19.5,16.5 22,26 14,20.5 6,26 8.5,16.5 1,10.5 10.5,10.5" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1"/></svg>`;
+  if(shape === 'cross')
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><rect x="11" y="1" width="6" height="26" rx="2" fill="${c}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/><rect x="1" y="11" width="26" height="6" rx="2" fill="${c}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><circle cx="14" cy="14" r="12" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><circle cx="14" cy="14" r="5" fill="white" opacity="0.8"/></svg>`;
+}
+
+function makeShapeIcon(shape, color){
+  return L.divIcon({
+    html: makeShapeSvg(shape, color),
+    className: '',
+    iconSize:    [28, 28],
+    iconAnchor:  [14, shape === 'triangle' ? 26 : 14],
+    popupAnchor: [0, -16]
+  });
+}
+
+function resolvePin(feature){
+  const props = feature.properties || {};
+  const raw = (props.type || props.facility_type || props.feature_type || '').toLowerCase();
+  if(raw){
+    for(const pt of PIN_TYPES){
+      if(pt.match.some(m => raw.includes(m))) return pt;
+    }
+  }
+  return { color: DEFAULT_PIN_COLOR, label: DEFAULT_PIN_LABEL };
+}
+
+// ── Cluster group factory ─────────────────────────────────────
+// disableClusteringAtZoom: at zoom 18+ every marker renders individually,
+// no matter how close together they are.
+// spiderfyOnMaxZoom handles the edge case where two points share the exact
+// same coordinate even after full unclustering.
+function makeClusterGroup(){
+  return L.markerClusterGroup({
+    maxClusterRadius: 60,
+    disableClusteringAtZoom: 18,
+    spiderfyOnMaxZoom: true,
+    showCoverageOnHover: false,
+    zoomToBoundsOnClick: true,
+    iconCreateFunction(cluster){
+      const n    = cluster.getChildCount();
+      const size = n < 10 ? 32 : n < 100 ? 40 : 50;
+      const fs   = n < 10 ? 12 : n < 100 ? 13 : 14;
+      const bg   = n < 10 ? '#06b6d4' : n < 100 ? '#0891b2' : '#0e7490';
+      return L.divIcon({
+        html: `<div class="marker-cluster-custom"
+                    style="width:${size}px;height:${size}px;background:${bg};font-size:${fs}px">
+                 ${n}
+               </div>`,
+        className: '',
+        iconSize: [size, size],
+        iconAnchor: [size/2, size/2]
+      });
+    }
+  });
+}
+
+const POPUP_SKIP = new Set(['marker-color','marker-symbol','marker-size','layer','fill_opacity','_color','_severity','_layer','description','instruction','_marker_shape','user_color','user_shape','label']);
+const POPUP_LABELS = {
+  BOX_NBR: 'Box Number',
+  BOX_ADDRESS: 'Box Address',
+  BOX_TYPE: 'Box Type',
+  BOX_LOCATION_DESCRIPTION: 'Location Description',
+  LOCATION_TYPE: 'Location Type',
+  LOCALE_NAME: 'Facility Name',
+  FACILITY_TYPE: 'Facility Type',
+  FACILITY: 'Facility',
+  ADDRESS: 'Address',
+  CITY: 'City',
+  STATE: 'State',
+  ZIP: 'ZIP Code',
+  ZIP3: 'ZIP3 Area',
+  ZIP5: 'ZIP Code',
+  ZIP_CODE: 'ZIP Code',
+  AREA_NAME: 'Area Name',
+  DIST_NAME: 'District Name',
+  DISTRICT_NAME: 'District Name',
+  DISTRICTID: 'District ID',
+  break_minutes: 'Drive Time',
+  service_area_label: 'Service Area',
+  count: 'Count',
+  cnt: 'Count',
+  rank: 'Rank',
+  route: 'Route',
+  origin_match: 'Start',
+  destination_match: 'Destination',
+  travel_time_min: 'Estimated Drive Time',
+  travel_distance_mi: 'Estimated Driving Distance',
+  event: 'Alert Type',
+  severity: 'Severity',
+  urgency: 'Urgency',
+  certainty: 'Certainty',
+  headline: 'Headline',
+  areaDesc: 'Affected Area',
+  effective: 'Effective',
+  expires: 'Expires'
+};
+
+function titleCaseWord(word){
+  if(!word) return word;
+  if(/^\d+$/.test(word) || /^[A-Z0-9&-]{2,}$/.test(word)) return word;
+  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+}
+
+function formatPopupLabel(key){
+  if(POPUP_LABELS[key]) return POPUP_LABELS[key];
+  return String(key)
+    .split('_')
+    .filter(Boolean)
+    .map(titleCaseWord)
+    .join(' ');
+}
+
+function formatPopupValue(value){
+  if(value == null) return '';
+  if(typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toLocaleString(undefined, {maximumFractionDigits: 2});
+  if(typeof value !== 'string') return String(value);
+  if(/^https?:\/\//i.test(value)) return value;
+  return value
+    .split('_')
+    .map(part => titleCaseWord(part))
+    .join(' ');
+}
+
+function bindPopup(feature, layer){
+  if(!feature.properties) return;
+
+  if(!isPoint(feature) && (feature.properties.break_minutes || feature.properties.service_area_label)){
+    const label = feature.properties.service_area_label || `${String(feature.properties.break_minutes).trim()} minute service area`;
+    layer.bindPopup(`<div style="color:#222;font-size:12px;font-weight:600">${label}</div>`);
+    return;
+  }
+
+  const entries = Object.entries(feature.properties).filter(([k,v]) => !POPUP_SKIP.has(k) && v != null && v !== '');
+  if(!entries.length) return;
+
+  let h='<div style="color:#222;font-size:12px;line-height:1.5">';
+  for(const [k,v] of entries){
+    h += `<div><b>${formatPopupLabel(k)}:</b> ${formatPopupValue(v)}</div>`;
+  }
+  layer.bindPopup(h + '</div>');
+}
+
+function buildLegend(usedLabels){
+  const el = document.getElementById('legend');
+  if(!usedLabels.size){ el.style.display='none'; return; }
+  const allTypes = [...PIN_TYPES, { color: DEFAULT_PIN_COLOR, label: DEFAULT_PIN_LABEL }];
+  el.innerHTML = allTypes
+    .filter(pt => usedLabels.has(pt.label))
+    .map(pt =>
+      `<div class="legend-row">` +
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 36" width="14" height="21">`+
+      `<path d="M12 0C5.37 0 0 5.37 0 12c0 6.63 12 24 12 24S24 18.63 24 12C24 5.37 18.63 0 12 0z"`+
+      ` fill="${pt.color}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/>`+
+      `<circle cx="12" cy="12" r="5" fill="white" opacity="0.85"/></svg>`+
+      `<span>${pt.label}</span></div>`
+    ).join('');
+  el.style.display = 'block';
+}
+
+function normalizeZipLegendLabel(value){
+  const s = String(value ?? '').trim();
+  const m = s.match(/^(\d{5})(?:\s*-.*)?$/);
+  return m ? m[1] : s;
+}
+
+function buildHeatLegend(features){
+  const el = document.getElementById('legend');
+  if(!features || !features.length){ el.style.display='none'; return; }
+  const seenZips = new Set();
+  const sorted = [...features]
+    .filter(f => f.properties && f.properties.rank)
+    .sort((a, b) => a.properties.rank - b.properties.rank)
+    .filter(f => {
+      const z = normalizeZipLegendLabel(f.properties.zip_code);
+      if(seenZips.has(z)) return false;
+      seenZips.add(z);
+      return true;
+    });
+  if(!sorted.length){ el.style.display='none'; return; }
+  el.innerHTML = `<div style="font-weight:600;margin-bottom:4px">Count by ZIP</div>` +
+    sorted.map(f => {
+      const p = f.properties;
+      const op = p.fill_opacity != null ? p.fill_opacity : 0.40;
+      const t  = Math.max(0, Math.min(1, (op - 0.12) / 0.60));
+      const cr = Math.round(252 + t * (220 - 252));
+      const cg = Math.round(165 + t * (38  - 165));
+      const cb = Math.round(165 + t * (38  - 165));
+      return `<div class="legend-row">` +
+        `<div style="width:14px;height:14px;border-radius:2px;background:rgb(${cr},${cg},${cb});border:1px solid #999"></div>` +
+        `<span>#${p.rank} ZIP ${normalizeZipLegendLabel(p.zip_code)} — ${p.count}</span>` +
+        `</div>`;
+    }).join('');
+  el.style.display = 'block';
+}
+
+function buildSaLegend(features){
+  const el = document.getElementById('legend');
+  const rings = [], seen = new Set();
+  (features||[]).forEach(f=>{
+    if(!isPoint(f)&&f.properties){
+      const bk=String(f.properties.break_minutes??'');
+      const c=f.properties.color||'#06b6d4';
+      if(bk&&!seen.has(bk)){seen.add(bk);rings.push({bk,c});}
+    }
+  });
+  if(!rings.length){el.style.display='none';return;}
+  rings.sort((a,b)=>Number(a.bk)-Number(b.bk));
+  el.innerHTML='<div style="font-weight:600;margin-bottom:4px">Drive-Time Rings</div>'+
+    rings.map(r=>
+      `<div class="legend-row">` +
+      `<svg width="18" height="12"><rect x="1" y="2" width="16" height="8" rx="2"` +
+      ` fill="${r.c}" fill-opacity="0.18" stroke="${r.c}" stroke-width="2.5"/></svg>` +
+      ` <span>${r.bk} min</span></div>`
+    ).join('');
+  el.style.display='block';
+}
+
+function buildBoundaryLegend(boundaryType, features){
+  const el = document.getElementById('legend');
+  const BCLR = {
+    zip:'#1d4ed8', state:'#3b82f6', county:'#f97316', district:'#22c55e',
+    area:'#84cc16', log_division:'#a855f7', log_region:'#8b5cf6',
+    proc_division:'#06b6d4', proc_region:'#0ea5e9', zip3:'#1d4ed8',
+    congressional:'#ec4899', retail_area:'#f43f5e'
+  };
+  const BLBL = {
+    zip:'ZIP Code', state:'State', county:'County', district:'USPS District',
+    area:'USPS Area', log_division:'Logistics Division', log_region:'Logistics Region',
+    proc_division:'Processing Division', proc_region:'Processing Region',
+    zip3:'ZIP3 Area', congressional:'Congressional District', retail_area:'Retail Delivery Area'
+  };
+  const clr = BCLR[boundaryType] || '#60a5fa';
+  const lbl = BLBL[boundaryType] || boundaryType;
+  const names = [...new Set(
+    (features||[])
+      .filter(f => !isPoint(f))
+      .map(f => f.properties && Object.values(f.properties)[0])
+      .filter(Boolean)
+      .map(v => boundaryType === 'zip' ? normalizeZipLegendLabel(v) : v)
+  )].slice(0,3).join(', ');
+  el.innerHTML =
+    `<div style="font-weight:600;margin-bottom:4px">${lbl}</div>` +
+    `<div class="legend-row">` +
+    `<svg width="18" height="12"><rect x="1" y="2" width="16" height="8" rx="2"` +
+    ` fill="${clr}" fill-opacity="0.15" stroke="${clr}" stroke-width="2.5"/></svg>` +
+    `<span style="font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis">${names||lbl}</span></div>`;
+  el.style.display='block';
+}
+
+function buildWeatherLegend(features){
+  const el = document.getElementById('legend');
+  el.innerHTML =
+    '<div style="font-weight:600;margin-bottom:4px">NWS Active Alerts</div>' +
+    '<div class="legend-row" style="gap:4px">' +
+    '<span style="font-size:10px;color:#555">Official NOAA symbology</span></div>' +
+    '<div class="legend-row" style="gap:4px">' +
+    '<a href="https://www.weather.gov/lwx/WarningsDefined" target="_blank" ' +
+    'style="font-size:10px;color:#2563eb;text-decoration:underline">Alert color reference</a></div>';
+  const ptCount = (features||[]).filter(f => isPoint(f)).length;
+  if(ptCount){
+    el.innerHTML += `<div class="legend-row" style="margin-top:4px"><span style="font-size:10px">${ptCount} affected facilities shown</span></div>`;
+  }
+  el.style.display='block';
+}
+
+function addMsg(text,role,sources){
+  const d=document.createElement('div');
+  d.className='msg '+role;
+  d.textContent=text;
+  if(sources&&sources.length){
+    const s=document.createElement('div');
+    s.className='sources';
+    s.textContent='Sources: '+sources.join(', ');
+    d.appendChild(s);
+  }
+  document.getElementById('messages').appendChild(d);
+  document.getElementById('messages').scrollTop=999999;
+  return d;
+}
+
+function addThinking(){
+  const d=document.createElement('div');
+  d.className='msg thinking';
+  d.id='thinking-msg';
+  d.innerHTML='Querying data sources<span class="dots"></span>';
+  document.getElementById('messages').appendChild(d);
+  document.getElementById('messages').scrollTop=999999;
+  let step=0;
+  const phrases=['Querying data sources','Analyzing results','Building map data','Almost there'];
+  d._interval=setInterval(()=>{
+    step++;
+    if(step<phrases.length){
+      d.innerHTML=phrases[step]+'<span class="dots"></span>';
+    }
+  },8000);
+  return d;
+}
+
+function removeThinking(){
+  const d=document.getElementById('thinking-msg');
+  if(d){ clearInterval(d._interval); d.remove(); }
+}
+
+function isPoint(f){
+  const t = f.geometry && f.geometry.type;
+  return t === 'Point' || t === 'MultiPoint';
+}
+
+function resetZipBrowse(){
+  zipBrowseState = null;
+  if(zipBrowseLayer){
+    map.removeLayer(zipBrowseLayer);
+    zipBrowseLayer = null;
+  }
+  map.off('moveend', queueZipBrowseLoad);
+}
+
+function queueZipBrowseLoad(){
+  if(!zipBrowseState || zipBrowseState.loading || !zipBrowseState.hasMore) return;
+  clearTimeout(zipBrowseState.timer);
+  zipBrowseState.timer = setTimeout(loadMoreZipBrowse, 250);
+}
+
+async function loadMoreZipBrowse(){
+  if(!zipBrowseState || zipBrowseState.loading || !zipBrowseState.hasMore) return;
+  zipBrowseState.loading = true;
+  document.getElementById('map-status').textContent =
+    `Loading more ZIP boundaries for ${zipBrowseState.city}, ${zipBrowseState.state}...`;
+  try{
+    const c = map.getCenter();
+    const res = await fetch('/api/zip-browse-batch', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        city: zipBrowseState.city,
+        state: zipBrowseState.state,
+        center_lat: c.lat,
+        center_lon: c.lng,
+        limit: zipBrowseState.batchSize || 30,
+        loaded_zips: Array.from(zipBrowseState.loadedZips || [])
+      })
+    });
+    const raw = await res.text();
+    const data = JSON.parse(raw);
+    if(!res.ok) throw new Error(data.detail || `ZIP browse batch failed with status ${res.status}`);
+
+    const newFeatures = (data.features || []).filter(f => {
+      const z = f && f.properties && f.properties.ZIP;
+      return z && !zipBrowseState.loadedZips.has(z);
+    });
+    newFeatures.forEach(f => zipBrowseState.loadedZips.add(f.properties.ZIP));
+
+    if(newFeatures.length){
+      zipBrowseState.features.push(...newFeatures);
+      zipBrowseLayer.addData({ type:'FeatureCollection', features:newFeatures });
+    }
+
+    const bProps = data.properties || {};
+    zipBrowseState.hasMore    = !!bProps.has_more;
+    zipBrowseState.totalCount = bProps.total_count || zipBrowseState.totalCount || zipBrowseState.features.length;
+    zipBrowseState.batchSize  = bProps.batch_size  || zipBrowseState.batchSize  || 30;
+    lastMapData = {
+      type:'FeatureCollection',
+      features: zipBrowseState.features.slice(),
+      properties: Object.assign({}, bProps)
+    };
+    const loaded = zipBrowseState.features.length;
+    document.getElementById('feat-count').textContent = `${loaded} feature(s)`;
+    document.getElementById('map-status').textContent = zipBrowseState.hasMore
+      ? `Loaded ${loaded} of ${zipBrowseState.totalCount} ZIP boundaries`
+      : `Loaded all ${loaded} ZIP boundaries`;
+  }catch(e){
+    document.getElementById('map-status').textContent = `ZIP lazy load error: ${e.message}`;
+    zipBrowseState.hasMore = false;
+  }finally{
+    if(zipBrowseState) zipBrowseState.loading = false;
+  }
+}
+
+function startZipBrowse(geojson){
+  const props = geojson.properties || {};
+  resetZipBrowse();
+  zipBrowseState = {
+    city:       props.city,
+    state:      props.state,
+    batchSize:  props.batch_size  || 30,
+    totalCount: props.total_count || (geojson.features || []).length,
+    hasMore:    !!props.has_more,
+    loading:    false,
+    timer:      null,
+    loadedZips: new Set(),
+    features:   []
+  };
+
+  zipBrowseLayer = L.geoJSON({ type:'FeatureCollection', features:[] }, {
+    filter: f => !isPoint(f),
+    style: ()=>({ color:'#1d4ed8', weight:3, opacity:1, fill:true, fillColor:'#1d4ed8', fillOpacity:0.08 }),
+    onEachFeature: bindPopup
+  }).addTo(map);
+
+  const initialFeatures = geojson.features || [];
+  if(initialFeatures.length){
+    initialFeatures.forEach(f => {
+      const z = f && f.properties && f.properties.ZIP;
+      if(z) zipBrowseState.loadedZips.add(z);
+    });
+    zipBrowseState.features = initialFeatures.slice();
+    zipBrowseLayer.addData({ type:'FeatureCollection', features: initialFeatures });
+    try{
+      const b = zipBrowseLayer.getBounds();
+      if(b.isValid()) map.fitBounds(b, {padding:[30,30], maxZoom:13});
+    }catch(e){}
+  }
+
+  const loaded = zipBrowseState.features.length;
+  document.getElementById('feat-count').textContent = `${loaded} feature(s)`;
+  document.getElementById('map-status').textContent = zipBrowseState.hasMore
+    ? `Loaded ${loaded} of ${zipBrowseState.totalCount} ZIP boundaries`
+    : `Loaded all ${loaded} ZIP boundaries`;
+
+  map.on('moveend', queueZipBrowseLoad);
+  if(zipBrowseState.hasMore) queueZipBrowseLoad();
+}
+
+function showMap(geojson){
+  const props         = geojson.properties || {};
+  const colorByType   = !!props.color_by_type;
+  const heatFill      = !!props.heat_fill;
+  const saRings       = !!props.sa_rings;
+  const boundaryType  = props.boundary_type || null;
+  const weatherAlerts = !!props.weather_alerts;
+  const lazyZipBrowse = !!props.lazy_zip_browse;
+  const usedLabels    = new Set();
+  const features      = geojson.features || [];
+
+  if(lazyZipBrowse){
+    startZipBrowse(geojson);
+    return;
+  }
+  resetZipBrowse();
+  // SA-ring polygons (break_minutes set) from containment responses don't count
+  // as "new" polygons — they are SA outlines we already have on the map.
+  const hasNewPolygons = features.some(
+    f => !isPoint(f) && !(f.properties && f.properties.break_minutes != null)
+  );
+  const preserveSaPolys = !saRings && !hasNewPolygons && !!polyLayer && !!haloLayer && !!polyLayer._saPersistent;
+
+  if(!preserveSaPolys){
+    if(haloLayer)  map.removeLayer(haloLayer);
+    if(polyLayer)  map.removeLayer(polyLayer);
+    if(noaaLayer) map.removeLayer(noaaLayer);
+    noaaLayer = null;
+  }
+  if(zipBrowseLayer) { map.removeLayer(zipBrowseLayer); zipBrowseLayer = null; }
+  if(pointLayer) map.removeLayer(pointLayer);
+  if(routeStopLayer) map.removeLayer(routeStopLayer);
+  routeStopLayer = L.layerGroup();
+
+
+  // ── Boundary colors per type ──────────────────────────────────────────────
+  const BCLR = {
+    zip:'#1d4ed8', state:'#3b82f6', county:'#f97316', district:'#22c55e',
+    area:'#84cc16', log_division:'#a855f7', log_region:'#8b5cf6',
+    proc_division:'#06b6d4', proc_region:'#0ea5e9', zip3:'#1d4ed8',
+    congressional:'#ec4899', retail_area:'#f43f5e'
+  };
+
+  if(!preserveSaPolys){
+  if(saRings){
+    // ── SA drive-time rings: per-feature colored halo + fill ─────────────
+    haloLayer = L.geoJSON(geojson, {
+      filter: f => !isPoint(f),
+      style: f => {
+        const c = (f.properties && f.properties.color) || '#06b6d4';
+        return { color:c, weight:12, opacity:0.22, fill:false, interactive:false };
+      }
+    }).addTo(map);
+    haloLayer._saPersistent = true;
+    polyLayer = L.geoJSON(geojson, {
+      filter: f => !isPoint(f),
+      style: f => {
+        const c = (f.properties && f.properties.color) || '#06b6d4';
+        return { color:c, weight:3, opacity:1, fill:true, fillColor:c, fillOpacity:0.12 };
+      },
+      onEachFeature: bindPopup
+    }).addTo(map);
+    polyLayer._saPersistent = true;
+
+  } else if(boundaryType){
+    // ── Named boundary: ZIP/ZIP3 = no fill, thick outline; others = light fill
+    const clr = props.user_color || BCLR[boundaryType] || '#60a5fa';
+    const isZipBdy = boundaryType === 'zip' || boundaryType === 'zip3';
+    haloLayer = L.geoJSON(geojson, {
+      filter: f => !isPoint(f),
+      style: ()=>({ color:'#ffffff', weight:isZipBdy ? 11 : 6, opacity:0.55, fill:false, interactive:false })
+    }).addTo(map);
+    polyLayer = L.geoJSON(geojson, {
+      filter: f => !isPoint(f),
+      style: ()=>({ color:clr, weight:isZipBdy ? 5 : 2.5, opacity:1,
+                    fill:!isZipBdy, fillColor:clr, fillOpacity:isZipBdy ? 0 : 0.08 }),
+      onEachFeature: bindPopup
+    }).addTo(map);
+
+  } else if(weatherAlerts){
+    // ── NWS weather alerts: render alert polygons from GeoJSON using severity color ──
+    haloLayer = L.geoJSON(geojson, {
+      filter: f => !isPoint(f),
+      style: f => {
+        const c = (f.properties && f.properties._color) || '#fbbf24';
+        return { color:'#ffffff', weight:6, opacity:0.5, fill:false, interactive:false };
+      }
+    }).addTo(map);
+    polyLayer = L.geoJSON(geojson, {
+      filter: f => !isPoint(f),
+      style: f => {
+        const c = (f.properties && f.properties._color) || '#fbbf24';
+        return { color:c, weight:2.5, opacity:1, fill:true, fillColor:c, fillOpacity:0.25 };
+      },
+      onEachFeature: bindPopup
+    }).addTo(map);
+    // NOAA official symbology layer as supplemental overlay (loads if network allows)
+    try {
+      noaaLayer = L.esri.dynamicMapLayer({
+        url: 'https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA/watch_warn_adv/MapServer',
+        opacity: 0.5,
+        attribution: 'NWS/NOAA'
+      }).addTo(map);
+    } catch(e){}
+  } else {
+    // ── Default: white halo + red / heat polygon ─────────────────────────
+    haloLayer = L.geoJSON(geojson, {
+      filter: f => !isPoint(f),
+      style: ()=>({ color:'#ffffff', weight:7, opacity:0.65, fill:false, interactive:false })
+    }).addTo(map);
+    polyLayer = L.geoJSON(geojson, {
+      filter: f => !isPoint(f),
+      style: f => {
+        if(heatFill){
+          const op = (f.properties && f.properties.fill_opacity != null)
+            ? f.properties.fill_opacity : 0.40;
+          const t = Math.max(0, Math.min(1, (op - 0.12) / 0.60));
+          const cr = Math.round(252 + t * (220 - 252));
+          const cg = Math.round(165 + t * (38  - 165));
+          const cb = Math.round(165 + t * (38  - 165));
+          return { color:'#991b1b', weight:2, opacity:0.9, fill:true,
+                   fillColor:`rgb(${cr},${cg},${cb})`, fillOpacity:0.85 };
+        }
+        const uClr = props.user_color || (f.properties && f.properties._color);
+        if(uClr)
+          return { color:uClr, weight:4, opacity:1, fill:true, fillColor:uClr, fillOpacity:0.15 };
+        return { color:'#ff1a1a', weight:4, opacity:1, fill:false };
+      },
+      onEachFeature: bindPopup
+    }).addTo(map);
+  }
+  } // end if(!preserveSaPolys)
+
+  pointLayer = makeClusterGroup();
+  L.geoJSON(geojson, {
+    filter: f => isPoint(f),
+    pointToLayer:(f,ll)=>{
+      const props = f.properties||{};
+      const isBox = props._layer === 'boxes';
+      const pin = colorByType ? resolvePin(f) : { color:DEFAULT_PIN_COLOR, label:DEFAULT_PIN_LABEL };
+      if(colorByType) usedLabels.add(isBox ? 'Collection Box' : pin.label);
+      // ArcGIS pattern: individual points are always small (8px),
+      // clusters provide the larger visual (32-50px)
+      const color = isBox ? (pin.color||'#16a34a') : (pin.color||'#69dcff');
+      return L.circleMarker(ll, {radius:4, fillColor:color, color:'rgba(0,139,174,0.5)', weight:1.5, fillOpacity:0.9});
+    },
+    onEachFeature: bindPopup
+  }).addTo(pointLayer);
+  pointLayer.addTo(map);
+
+  // ── Route stop markers: numbered circles at origin/destination ───────────
+  (geojson.features || []).forEach(f => {
+    if(!f.geometry || !f.properties) return;
+    const gtype = f.geometry.type;
+    const hasRoute = f.properties.route || f.properties.origin_match || f.properties.destination_match;
+    if(!hasRoute) return;
+    let coords = [];
+    if(gtype === 'LineString') coords = f.geometry.coordinates;
+    else if(gtype === 'MultiLineString') coords = f.geometry.coordinates.flat();
+    if(coords.length < 2) return;
+    const start = coords[0];
+    const end = coords[coords.length - 1];
+    const sz = 30;
+    const startIcon = L.divIcon({
+      html: `<div class="route-stop start" style="width:${sz}px;height:${sz}px">1</div>`,
+      className: '', iconSize:[sz,sz], iconAnchor:[sz/2,sz/2]
+    });
+    const endIcon = L.divIcon({
+      html: `<div class="route-stop end" style="width:${sz}px;height:${sz}px">2</div>`,
+      className: '', iconSize:[sz,sz], iconAnchor:[sz/2,sz/2]
+    });
+    L.marker([start[1],start[0]], {icon:startIcon})
+      .bindPopup(`<div style="color:#222;font-size:12px"><b>Start:</b> ${f.properties.origin_match||'Origin'}</div>`)
+      .addTo(routeStopLayer);
+    L.marker([end[1],end[0]], {icon:endIcon})
+      .bindPopup(`<div style="color:#222;font-size:12px"><b>End:</b> ${f.properties.destination_match||'Destination'}</div>`)
+      .addTo(routeStopLayer);
+  });
+  if(routeStopLayer.getLayers().length) routeStopLayer.addTo(map);
+
+  // ── Legend dispatch ───────────────────────────────────────────────────────
+  if(saRings)             buildSaLegend(geojson.features || []);
+  else if(heatFill)       buildHeatLegend(geojson.features || []);
+  else if(colorByType)    buildLegend(usedLabels);
+  else if(boundaryType)   buildBoundaryLegend(boundaryType, geojson.features || []);
+  else if(weatherAlerts)  buildWeatherLegend(geojson.features || []);
+  else if(!preserveSaPolys) document.getElementById('legend').style.display='none';
+
+  // ── Fit map to extent of all displayed geography ──────────────────────
+  let bounds = null;
+  let polyBounds = null;
+  try { if(pointLayer.getLayers().length) bounds = pointLayer.getBounds(); } catch(e){}
+  try {
+    const pb = polyLayer.getBounds();
+    if(pb.isValid()){
+      polyBounds = pb;
+      if(!preserveSaPolys || !bounds) bounds = bounds ? bounds.extend(pb) : pb;
+    }
+  } catch(e){}
+  if(bounds && bounds.isValid()){
+    const nPts = pointLayer.getLayers().length;
+    if(nPts === 1 && (!polyBounds || preserveSaPolys)){
+      // Single point, or point-only follow-up with preserved service area — zoom in close
+      map.setView(bounds.getCenter(), 15);
+    } else {
+      // Fit to the full extent; maxZoom:17 allows tight zoom on small geographies
+      map.fitBounds(bounds, {padding:[30,30], maxZoom:17});
+    }
+  }
+
+  const n = geojson.features ? geojson.features.length : 0;
+  document.getElementById('feat-count').textContent = n+' feature(s)';
+  document.getElementById('map-status').textContent = 'Results displayed';
+}
+
+async function ask(){
+  const input=document.getElementById('q');
+  const text=input.value.trim();
+  if(!text)return;
+  input.value='';
+  addMsg(text,'user');
+  const btn=document.getElementById('btn');
+  btn.disabled=true;
+  document.getElementById('map-status').textContent='Processing...';
+  addThinking();
+
+  const historySnapshot = conversationHistory.slice();
+  pushHistory('user', text);
+
+  try{
+    const res=await fetch('/api/chat',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:text, history: historySnapshot})
+    });
+    const raw=await res.text();
+    let data;
+    try{
+      data=JSON.parse(raw);
+    }catch(parseErr){
+      throw new Error(`Server returned invalid JSON (${res.status}): ${raw.slice(0,200)}`);
+    }
+    if(!res.ok){
+      throw new Error(data.answer || data.detail || `Request failed with status ${res.status}`);
+    }
+    removeThinking();
+    addMsg(data.answer,'bot',data.sources);
+    pushHistory('assistant', data.answer);
+    if(data.map_data){
+      if(data.map_data.properties && data.map_data.properties.restyle_only && lastMapData){
+        // User requested a style change with no new data — re-render last layer with merged style
+        const reStyled = Object.assign({}, lastMapData);
+        reStyled.properties = Object.assign({}, reStyled.properties || {}, data.map_data.properties);
+        delete reStyled.properties.restyle_only;
+        showMap(reStyled);
+      } else {
+        lastMapData = data.map_data;
+        showMap(data.map_data);
+      }
+    } else {
+      document.getElementById('map-status').textContent='No spatial data in response';
+    }
+  }catch(e){
+    removeThinking();
+    addMsg('Error: '+e.message,'bot');
+  }
+  btn.disabled=false;
+}
+</script>
+</body>
+</html>

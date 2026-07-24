@@ -208,5 +208,5 @@ async def _process_request(request_id: str, req: GeoRequest):
 
 @app.get("/", response_class=FileResponse)
 async def gui():
-    """Serve the Leaflet chat GUI from static/index.html."""
+    """Serve the Esri JS API chat GUI for testing (swap back to index.html after verification)."""
     return FileResponse(os.path.join(_STATIC_DIR, "index.html"))

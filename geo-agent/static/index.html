@@ -5,18 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GeoAgent</title>
 <script>if(location.hostname.includes('geo-agent-dev'))document.title='[DEV] '+document.title;</script>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-<!-- Esri Leaflet — exposes L.esri (tiledMapLayer, featureLayer, dynamicMapLayer, etc.) -->
-<script src="https://unpkg.com/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
+<link rel="stylesheet" href="https://js.arcgis.com/4.32/esri/themes/light/main.css"/>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:system-ui,sans-serif;display:flex;height:100vh;background:#111827;color:#e5e7eb}
 #sidebar{width:420px;display:flex;flex-direction:column;border-right:1px solid #374151}
-#header{padding:14px 18px;background:#1f2937;border-bottom:1px solid #374151;
-        display:flex;align-items:center}
+#header{padding:14px 18px;background:#1f2937;border-bottom:1px solid #374151;display:flex;align-items:center}
 #header h1{font-size:15px;font-weight:600}
 #messages{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
 .msg{padding:10px 14px;border-radius:10px;max-width:92%;font-size:13.5px;line-height:1.5;white-space:pre-wrap}
@@ -28,43 +22,21 @@ body{font-family:system-ui,sans-serif;display:flex;height:100vh;background:#1118
 .thinking .dots::after{content:'';animation:dots 1.5s steps(4,end) infinite}
 @keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
 #input-row{padding:12px;background:#1f2937;border-top:1px solid #374151;display:flex;gap:8px}
-#q{flex:1;padding:10px 12px;border-radius:8px;border:1px solid #4b5563;
-   background:#111827;color:#e5e7eb;font-size:13px;outline:none}
+#q{flex:1;padding:10px 12px;border-radius:8px;border:1px solid #4b5563;background:#111827;color:#e5e7eb;font-size:13px;outline:none}
 #q:focus{border-color:#06b6d4}
-button{padding:10px 18px;background:#06b6d4;color:#000;border:none;border-radius:8px;
-       cursor:pointer;font-weight:600;font-size:13px}
+button{padding:10px 18px;background:#06b6d4;color:#000;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px}
 button:disabled{background:#4b5563;cursor:wait}
 #map-wrap{flex:1;position:relative;display:flex;flex-direction:column}
-#map-bar{padding:6px 12px;background:#1f2937;border-bottom:1px solid #374151;
-         font-size:12px;color:#9ca3af;display:flex;justify-content:space-between;align-items:center}
-#map{flex:1}
-#legend{position:absolute;bottom:24px;right:10px;background:rgba(255,255,255,0.93);
-        border-radius:7px;padding:8px 12px;font-size:11px;color:#222;z-index:1000;
-        box-shadow:0 1px 5px rgba(0,0,0,0.25);line-height:2;display:none}
+#map-bar{padding:6px 12px;background:#f8fafc;border-bottom:1px solid #e2e8f0;font-size:12px;color:#475569;display:flex;justify-content:space-between;align-items:center;box-shadow:0 1px 3px rgba(0,0,0,0.07)}
+#map{flex:1;min-height:0}
+#legend{position:absolute;bottom:24px;right:10px;background:rgba(255,255,255,0.93);border-radius:7px;padding:8px 12px;font-size:11px;color:#222;z-index:10;box-shadow:0 1px 5px rgba(0,0,0,0.25);line-height:2;display:none}
 #legend .legend-row{display:flex;align-items:center;gap:6px;white-space:nowrap}
-/* Override default markercluster styles with cyan theme */
-.marker-cluster-custom{
-  display:flex;align-items:center;justify-content:center;
-  border-radius:50%;font-weight:700;color:#000;
-  border:2.5px solid rgba(255,255,255,0.85);
-  box-shadow:0 1px 5px rgba(0,0,0,0.35);
-}
-/* Route stop markers */
-.route-stop{
-  display:flex;align-items:center;justify-content:center;
-  border-radius:50%;font-weight:700;color:#fff;
-  border:3px solid #fff;
-  box-shadow:0 2px 6px rgba(0,0,0,0.4);
-  font-size:14px;line-height:1;
-}
-.route-stop.start{background:#16a34a}
-.route-stop.end{background:#dc2626}
-/* Basemap switcher */
 #basemap-switcher{display:flex;gap:3px}
-.bm-btn{padding:3px 9px;background:#374151;color:#d1d5db;border:1px solid #4b5563;
-        border-radius:4px;cursor:pointer;font-size:11px;font-weight:500;line-height:1.6}
-.bm-btn:hover{background:#4b5563;color:#f9fafb}
-.bm-btn.active{background:#06b6d4;color:#000;border-color:#06b6d4}
+.bm-btn{padding:3px 9px;background:#fff;color:#374151;border:1px solid #cbd5e1;border-radius:4px;cursor:pointer;font-size:11px;font-weight:500;line-height:1.6}
+.bm-btn:hover{background:#f1f5f9;color:#0f172a}
+.bm-btn.active{background:#0ea5e9;color:#fff;border-color:#0ea5e9}
+.route-stop{display:flex;align-items:center;justify-content:center;border-radius:50%;font-weight:700;color:#fff;border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.4);font-size:14px;line-height:1}
+.route-stop.start{background:#16a34a}.route-stop.end{background:#dc2626}
 </style>
 </head>
 <body>
@@ -74,7 +46,7 @@ button:disabled{background:#4b5563;cursor:wait}
     <div class="msg bot">Ask me a geospatial question. I'll return an answer and show results on the map.
 
 Try:
-• "Nearest 5 facilities to 38120"
+• "Nearest 5 facilities to 22201"
 • "Show 5 and 10 min service area from 94103"
 • "How many collection boxes are inside zip 77002?"
 • "Show me the boundary for zip 85004"
@@ -99,805 +71,364 @@ Try:
   <div id="map"></div>
   <div id="legend"></div>
 </div>
+<script src="https://js.arcgis.com/4.32/"></script>
 <script>
-// ── Conversation history — rolling last 10 messages (5 turns) ────────────
-const MAX_HISTORY = 10;
-let conversationHistory = [];
-let lastMapData = null;  // tracks last rendered GeoJSON for restyle_only re-renders
-let zipBrowseState = null;  // active center-out lazy ZIP browse session
-let zipBrowseLayer = null;  // Leaflet layer group for incrementally-loaded ZIP polygons
+require([
+  'esri/config',
+  'esri/Map',
+  'esri/views/MapView',
+  'esri/layers/GraphicsLayer',
+  'esri/layers/GeoJSONLayer',
+  'esri/Graphic',
+  'esri/geometry/Extent'
+], function(esriConfig, EsriMap, MapView, GraphicsLayer, GeoJSONLayer, Graphic, Extent) {
+  esriConfig.apiKey = 'AAPTaZhtjBk8wSJOqUx0ROsp9RQ..QApBMbtB4bXmQ9BHYBq_S_3rsLECk7UEJKCDb1nSsu4bFuBYYiwF8Kfx6AF-rPu-lU7oX3wpdQPNkkgsZuJcyCpML9v-Vwg04y_bh2mrVWksDGAH2Fs5rKCZvEvlJ_hHxKyGVBIM-LUG8Tr9k7QPYQxPiwWV3oLOP4BW3YikOEuXiENrr6ZU_EaAdBuvBgH64yQrXTvfWcALZIKYbm1f0hhG5X8lM52-rFlYz_9OMS5gINuBltj8jykexnY0G_yUPA..AT1_ANHQeoyo';
 
-function pushHistory(role, content){
-  conversationHistory.push({ role, content });
-  if(conversationHistory.length > MAX_HISTORY)
-    conversationHistory.splice(0, conversationHistory.length - MAX_HISTORY);
-}
+  const MAX_HISTORY = 10;
+  let conversationHistory = [];
+  let lastMapData = null;
+  let currentBasemap = 'osm';
+  let pointLayer = null;
+  let pointBlobUrl = null;
 
-const CONUS_BOUNDS = [[24.4, -125.0], [49.4, -66.9]];
-const map = L.map('map', { maxZoom: 18 }).fitBounds(CONUS_BOUNDS);
+  const map = new EsriMap({ basemap: 'osm' });
+  const resultsLayer = new GraphicsLayer();
+  map.add(resultsLayer);
 
-const BASEMAP_LAYERS = {
-  osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-  }),
-  imagery: L.esri.tiledMapLayer({
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer',
-    attribution: 'Tiles &copy; Esri &mdash; Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
-  }),
-  topo: L.esri.tiledMapLayer({
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer',
-    attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ, TomTom, Intermap, iPC, USGS, FAO, NPS, NRCAN, GeoBase, Kadaster NL, Ordnance Survey, Esri Japan, METI, Esri China (Hong Kong), and the GIS User Community'
-  })
-};
-
-let currentBasemap = 'osm';
-BASEMAP_LAYERS.osm.addTo(map);
-
-function setBasemap(name) {
-  if (name === currentBasemap) return;
-  map.removeLayer(BASEMAP_LAYERS[currentBasemap]);
-  BASEMAP_LAYERS[name].addTo(map);
-  BASEMAP_LAYERS[name].bringToBack();
-  currentBasemap = name;
-  document.querySelectorAll('.bm-btn').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
-}
-
-let pointLayer = null;
-let polyLayer  = null;
-let haloLayer  = null;
-let routeStopLayer = null;
-let noaaLayer = null;
-
-const PIN_TYPES = [
-  { match: ['p&dc','pdc','processing','distribution'], color:'#1d4ed8', label:'P&DC / Processing' },
-  { match: ['post office','post_office'],              color:'#dc2626', label:'Post Office'       },
-  { match: ['collection box','collection_box','box','_box_layer'], color:'#16a34a', label:'Collection Box' },
-  { match: ['annex','adc','aadc'],                     color:'#7c3aed', label:'Annex / ADC'      },
-  { match: ['carrier','cfs','station'],                color:'#ea580c', label:'Carrier / Station' },
-];
-const DEFAULT_PIN_COLOR = '#06b6d4';
-const DEFAULT_PIN_LABEL = 'Other';
-
-function makePinSvg(color){
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 36" width="24" height="36">
-    <path d="M12 0C5.37 0 0 5.37 0 12c0 6.63 12 24 12 24S24 18.63 24 12C24 5.37 18.63 0 12 0z"
-          fill="${color}" stroke="rgba(0,0,0,0.25)" stroke-width="1"/>
-    <circle cx="12" cy="12" r="5" fill="white" opacity="0.85"/>
-  </svg>`;
-}
-
-function makeIcon(color){
-  return L.divIcon({
-    html: makePinSvg(color),
-    className: '',
-    iconSize:    [24, 36],
-    iconAnchor:  [12, 36],
-    popupAnchor: [0, -38]
-  });
-}
-
-function makeBoxSvg(color){
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 26 22" width="26" height="22">
-    <rect x="1" y="5" width="24" height="16" rx="4"
-          fill="${color}" stroke="rgba(0,0,0,0.28)" stroke-width="1.5"/>
-    <path d="M1 9 Q1 5 5 5 L21 5 Q25 5 25 9"
-          fill="${color}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/>
-    <rect x="9" y="5" width="8" height="5" rx="1" fill="rgba(255,255,255,0.3)"/>
-    <rect x="4" y="14" width="18" height="1.5" rx="0.75" fill="rgba(255,255,255,0.45)"/>
-    <circle cx="13" cy="18" r="1.5" fill="rgba(255,255,255,0.65)"/>
-  </svg>`;
-}
-
-function makeBoxIcon(color){
-  return L.divIcon({
-    html: makeBoxSvg(color),
-    className: '',
-    iconSize:    [26, 22],
-    iconAnchor:  [13, 22],
-    popupAnchor: [0, -24]
-  });
-}
-
-function makeShapeSvg(shape, color){
-  const c = color || '#06b6d4';
-  if(shape === 'square')
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><rect x="2" y="2" width="24" height="24" rx="3" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><rect x="9" y="9" width="10" height="10" fill="white" opacity="0.7"/></svg>`;
-  if(shape === 'triangle')
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><polygon points="14,1 27,26 1,26" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><polygon points="14,11 21,24 7,24" fill="white" opacity="0.6"/></svg>`;
-  if(shape === 'diamond')
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><polygon points="14,1 27,14 14,27 1,14" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><polygon points="14,8 21,14 14,20 7,14" fill="white" opacity="0.7"/></svg>`;
-  if(shape === 'star')
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><polygon points="14,1 17.5,10.5 27,10.5 19.5,16.5 22,26 14,20.5 6,26 8.5,16.5 1,10.5 10.5,10.5" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1"/></svg>`;
-  if(shape === 'cross')
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><rect x="11" y="1" width="6" height="26" rx="2" fill="${c}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/><rect x="1" y="11" width="26" height="6" rx="2" fill="${c}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/></svg>`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><circle cx="14" cy="14" r="12" fill="${c}" stroke="rgba(0,0,0,0.3)" stroke-width="1.5"/><circle cx="14" cy="14" r="5" fill="white" opacity="0.8"/></svg>`;
-}
-
-function makeShapeIcon(shape, color){
-  return L.divIcon({
-    html: makeShapeSvg(shape, color),
-    className: '',
-    iconSize:    [28, 28],
-    iconAnchor:  [14, shape === 'triangle' ? 26 : 14],
-    popupAnchor: [0, -16]
-  });
-}
-
-function resolvePin(feature){
-  const props = feature.properties || {};
-  const raw = (props.type || props.facility_type || props.feature_type || '').toLowerCase();
-  if(raw){
-    for(const pt of PIN_TYPES){
-      if(pt.match.some(m => raw.includes(m))) return pt;
-    }
-  }
-  return { color: DEFAULT_PIN_COLOR, label: DEFAULT_PIN_LABEL };
-}
-
-// ── Cluster group factory ─────────────────────────────────────
-// disableClusteringAtZoom: at zoom 18+ every marker renders individually,
-// no matter how close together they are.
-// spiderfyOnMaxZoom handles the edge case where two points share the exact
-// same coordinate even after full unclustering.
-function makeClusterGroup(){
-  return L.markerClusterGroup({
-    maxClusterRadius: 60,
-    disableClusteringAtZoom: 18,
-    spiderfyOnMaxZoom: true,
-    showCoverageOnHover: false,
-    zoomToBoundsOnClick: true,
-    iconCreateFunction(cluster){
-      const n    = cluster.getChildCount();
-      const size = n < 10 ? 32 : n < 100 ? 40 : 50;
-      const fs   = n < 10 ? 12 : n < 100 ? 13 : 14;
-      const bg   = n < 10 ? '#06b6d4' : n < 100 ? '#0891b2' : '#0e7490';
-      return L.divIcon({
-        html: `<div class="marker-cluster-custom"
-                    style="width:${size}px;height:${size}px;background:${bg};font-size:${fs}px">
-                 ${n}
-               </div>`,
-        className: '',
-        iconSize: [size, size],
-        iconAnchor: [size/2, size/2]
-      });
-    }
-  });
-}
-
-const POPUP_SKIP = new Set(['marker-color','marker-symbol','marker-size','layer','fill_opacity','_color','_severity','_layer','description','instruction','_marker_shape','user_color','user_shape','label']);
-const POPUP_LABELS = {
-  BOX_NBR: 'Box Number',
-  BOX_ADDRESS: 'Box Address',
-  BOX_TYPE: 'Box Type',
-  BOX_LOCATION_DESCRIPTION: 'Location Description',
-  LOCATION_TYPE: 'Location Type',
-  LOCALE_NAME: 'Facility Name',
-  FACILITY_TYPE: 'Facility Type',
-  FACILITY: 'Facility',
-  ADDRESS: 'Address',
-  CITY: 'City',
-  STATE: 'State',
-  ZIP: 'ZIP Code',
-  ZIP3: 'ZIP3 Area',
-  ZIP5: 'ZIP Code',
-  ZIP_CODE: 'ZIP Code',
-  AREA_NAME: 'Area Name',
-  DIST_NAME: 'District Name',
-  DISTRICT_NAME: 'District Name',
-  DISTRICTID: 'District ID',
-  break_minutes: 'Drive Time',
-  service_area_label: 'Service Area',
-  count: 'Count',
-  cnt: 'Count',
-  rank: 'Rank',
-  route: 'Route',
-  origin_match: 'Start',
-  destination_match: 'Destination',
-  travel_time_min: 'Estimated Drive Time',
-  travel_distance_mi: 'Estimated Driving Distance',
-  event: 'Alert Type',
-  severity: 'Severity',
-  urgency: 'Urgency',
-  certainty: 'Certainty',
-  headline: 'Headline',
-  areaDesc: 'Affected Area',
-  effective: 'Effective',
-  expires: 'Expires'
-};
-
-function titleCaseWord(word){
-  if(!word) return word;
-  if(/^\d+$/.test(word) || /^[A-Z0-9&-]{2,}$/.test(word)) return word;
-  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-}
-
-function formatPopupLabel(key){
-  if(POPUP_LABELS[key]) return POPUP_LABELS[key];
-  return String(key)
-    .split('_')
-    .filter(Boolean)
-    .map(titleCaseWord)
-    .join(' ');
-}
-
-function formatPopupValue(value){
-  if(value == null) return '';
-  if(typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toLocaleString(undefined, {maximumFractionDigits: 2});
-  if(typeof value !== 'string') return String(value);
-  if(/^https?:\/\//i.test(value)) return value;
-  return value
-    .split('_')
-    .map(part => titleCaseWord(part))
-    .join(' ');
-}
-
-function bindPopup(feature, layer){
-  if(!feature.properties) return;
-
-  if(!isPoint(feature) && (feature.properties.break_minutes || feature.properties.service_area_label)){
-    const label = feature.properties.service_area_label || `${String(feature.properties.break_minutes).trim()} minute service area`;
-    layer.bindPopup(`<div style="color:#222;font-size:12px;font-weight:600">${label}</div>`);
-    return;
-  }
-
-  const entries = Object.entries(feature.properties).filter(([k,v]) => !POPUP_SKIP.has(k) && v != null && v !== '');
-  if(!entries.length) return;
-
-  let h='<div style="color:#222;font-size:12px;line-height:1.5">';
-  for(const [k,v] of entries){
-    h += `<div><b>${formatPopupLabel(k)}:</b> ${formatPopupValue(v)}</div>`;
-  }
-  layer.bindPopup(h + '</div>');
-}
-
-function buildLegend(usedLabels){
-  const el = document.getElementById('legend');
-  if(!usedLabels.size){ el.style.display='none'; return; }
-  const allTypes = [...PIN_TYPES, { color: DEFAULT_PIN_COLOR, label: DEFAULT_PIN_LABEL }];
-  el.innerHTML = allTypes
-    .filter(pt => usedLabels.has(pt.label))
-    .map(pt =>
-      `<div class="legend-row">` +
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 36" width="14" height="21">`+
-      `<path d="M12 0C5.37 0 0 5.37 0 12c0 6.63 12 24 12 24S24 18.63 24 12C24 5.37 18.63 0 12 0z"`+
-      ` fill="${pt.color}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/>`+
-      `<circle cx="12" cy="12" r="5" fill="white" opacity="0.85"/></svg>`+
-      `<span>${pt.label}</span></div>`
-    ).join('');
-  el.style.display = 'block';
-}
-
-function normalizeZipLegendLabel(value){
-  const s = String(value ?? '').trim();
-  const m = s.match(/^(\d{5})(?:\s*-.*)?$/);
-  return m ? m[1] : s;
-}
-
-function buildHeatLegend(features){
-  const el = document.getElementById('legend');
-  if(!features || !features.length){ el.style.display='none'; return; }
-  const seenZips = new Set();
-  const sorted = [...features]
-    .filter(f => f.properties && f.properties.rank)
-    .sort((a, b) => a.properties.rank - b.properties.rank)
-    .filter(f => {
-      const z = normalizeZipLegendLabel(f.properties.zip_code);
-      if(seenZips.has(z)) return false;
-      seenZips.add(z);
-      return true;
-    });
-  if(!sorted.length){ el.style.display='none'; return; }
-  el.innerHTML = `<div style="font-weight:600;margin-bottom:4px">Count by ZIP</div>` +
-    sorted.map(f => {
-      const p = f.properties;
-      const op = p.fill_opacity != null ? p.fill_opacity : 0.40;
-      const t  = Math.max(0, Math.min(1, (op - 0.12) / 0.60));
-      const cr = Math.round(252 + t * (220 - 252));
-      const cg = Math.round(165 + t * (38  - 165));
-      const cb = Math.round(165 + t * (38  - 165));
-      return `<div class="legend-row">` +
-        `<div style="width:14px;height:14px;border-radius:2px;background:rgb(${cr},${cg},${cb});border:1px solid #999"></div>` +
-        `<span>#${p.rank} ZIP ${normalizeZipLegendLabel(p.zip_code)} — ${p.count}</span>` +
-        `</div>`;
-    }).join('');
-  el.style.display = 'block';
-}
-
-function buildSaLegend(features){
-  const el = document.getElementById('legend');
-  const rings = [], seen = new Set();
-  (features||[]).forEach(f=>{
-    if(!isPoint(f)&&f.properties){
-      const bk=String(f.properties.break_minutes??'');
-      const c=f.properties.color||'#06b6d4';
-      if(bk&&!seen.has(bk)){seen.add(bk);rings.push({bk,c});}
-    }
-  });
-  if(!rings.length){el.style.display='none';return;}
-  rings.sort((a,b)=>Number(a.bk)-Number(b.bk));
-  el.innerHTML='<div style="font-weight:600;margin-bottom:4px">Drive-Time Rings</div>'+
-    rings.map(r=>
-      `<div class="legend-row">` +
-      `<svg width="18" height="12"><rect x="1" y="2" width="16" height="8" rx="2"` +
-      ` fill="${r.c}" fill-opacity="0.18" stroke="${r.c}" stroke-width="2.5"/></svg>` +
-      ` <span>${r.bk} min</span></div>`
-    ).join('');
-  el.style.display='block';
-}
-
-function buildBoundaryLegend(boundaryType, features){
-  const el = document.getElementById('legend');
-  const BCLR = {
-    zip:'#1d4ed8', state:'#3b82f6', county:'#f97316', district:'#22c55e',
-    area:'#84cc16', log_division:'#a855f7', log_region:'#8b5cf6',
-    proc_division:'#06b6d4', proc_region:'#0ea5e9', zip3:'#1d4ed8',
-    congressional:'#ec4899', retail_area:'#f43f5e'
-  };
-  const BLBL = {
-    zip:'ZIP Code', state:'State', county:'County', district:'USPS District',
-    area:'USPS Area', log_division:'Logistics Division', log_region:'Logistics Region',
-    proc_division:'Processing Division', proc_region:'Processing Region',
-    zip3:'ZIP3 Area', congressional:'Congressional District', retail_area:'Retail Delivery Area'
-  };
-  const clr = BCLR[boundaryType] || '#60a5fa';
-  const lbl = BLBL[boundaryType] || boundaryType;
-  const names = [...new Set(
-    (features||[])
-      .filter(f => !isPoint(f))
-      .map(f => f.properties && Object.values(f.properties)[0])
-      .filter(Boolean)
-      .map(v => boundaryType === 'zip' ? normalizeZipLegendLabel(v) : v)
-  )].slice(0,3).join(', ');
-  el.innerHTML =
-    `<div style="font-weight:600;margin-bottom:4px">${lbl}</div>` +
-    `<div class="legend-row">` +
-    `<svg width="18" height="12"><rect x="1" y="2" width="16" height="8" rx="2"` +
-    ` fill="${clr}" fill-opacity="0.15" stroke="${clr}" stroke-width="2.5"/></svg>` +
-    `<span style="font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis">${names||lbl}</span></div>`;
-  el.style.display='block';
-}
-
-function buildWeatherLegend(features){
-  const el = document.getElementById('legend');
-  el.innerHTML =
-    '<div style="font-weight:600;margin-bottom:4px">NWS Active Alerts</div>' +
-    '<div class="legend-row" style="gap:4px">' +
-    '<span style="font-size:10px;color:#555">Official NOAA symbology</span></div>' +
-    '<div class="legend-row" style="gap:4px">' +
-    '<a href="https://www.weather.gov/lwx/WarningsDefined" target="_blank" ' +
-    'style="font-size:10px;color:#2563eb;text-decoration:underline">Alert color reference</a></div>';
-  const ptCount = (features||[]).filter(f => isPoint(f)).length;
-  if(ptCount){
-    el.innerHTML += `<div class="legend-row" style="margin-top:4px"><span style="font-size:10px">${ptCount} affected facilities shown</span></div>`;
-  }
-  el.style.display='block';
-}
-
-function addMsg(text,role,sources){
-  const d=document.createElement('div');
-  d.className='msg '+role;
-  d.textContent=text;
-  if(sources&&sources.length){
-    const s=document.createElement('div');
-    s.className='sources';
-    s.textContent='Sources: '+sources.join(', ');
-    d.appendChild(s);
-  }
-  document.getElementById('messages').appendChild(d);
-  document.getElementById('messages').scrollTop=999999;
-  return d;
-}
-
-function addThinking(){
-  const d=document.createElement('div');
-  d.className='msg thinking';
-  d.id='thinking-msg';
-  d.innerHTML='Querying data sources<span class="dots"></span>';
-  document.getElementById('messages').appendChild(d);
-  document.getElementById('messages').scrollTop=999999;
-  let step=0;
-  const phrases=['Querying data sources','Analyzing results','Building map data','Almost there'];
-  d._interval=setInterval(()=>{
-    step++;
-    if(step<phrases.length){
-      d.innerHTML=phrases[step]+'<span class="dots"></span>';
-    }
-  },8000);
-  return d;
-}
-
-function removeThinking(){
-  const d=document.getElementById('thinking-msg');
-  if(d){ clearInterval(d._interval); d.remove(); }
-}
-
-function isPoint(f){
-  const t = f.geometry && f.geometry.type;
-  return t === 'Point' || t === 'MultiPoint';
-}
-
-function resetZipBrowse(){
-  zipBrowseState = null;
-  if(zipBrowseLayer){
-    map.removeLayer(zipBrowseLayer);
-    zipBrowseLayer = null;
-  }
-  map.off('moveend', queueZipBrowseLoad);
-}
-
-function queueZipBrowseLoad(){
-  if(!zipBrowseState || zipBrowseState.loading || !zipBrowseState.hasMore) return;
-  clearTimeout(zipBrowseState.timer);
-  zipBrowseState.timer = setTimeout(loadMoreZipBrowse, 250);
-}
-
-async function loadMoreZipBrowse(){
-  if(!zipBrowseState || zipBrowseState.loading || !zipBrowseState.hasMore) return;
-  zipBrowseState.loading = true;
-  document.getElementById('map-status').textContent =
-    `Loading more ZIP boundaries for ${zipBrowseState.city}, ${zipBrowseState.state}...`;
-  try{
-    const c = map.getCenter();
-    const res = await fetch('/api/zip-browse-batch', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        city: zipBrowseState.city,
-        state: zipBrowseState.state,
-        center_lat: c.lat,
-        center_lon: c.lng,
-        limit: zipBrowseState.batchSize || 30,
-        loaded_zips: Array.from(zipBrowseState.loadedZips || [])
-      })
-    });
-    const raw = await res.text();
-    const data = JSON.parse(raw);
-    if(!res.ok) throw new Error(data.detail || `ZIP browse batch failed with status ${res.status}`);
-
-    const newFeatures = (data.features || []).filter(f => {
-      const z = f && f.properties && f.properties.ZIP;
-      return z && !zipBrowseState.loadedZips.has(z);
-    });
-    newFeatures.forEach(f => zipBrowseState.loadedZips.add(f.properties.ZIP));
-
-    if(newFeatures.length){
-      zipBrowseState.features.push(...newFeatures);
-      zipBrowseLayer.addData({ type:'FeatureCollection', features:newFeatures });
-    }
-
-    const bProps = data.properties || {};
-    zipBrowseState.hasMore    = !!bProps.has_more;
-    zipBrowseState.totalCount = bProps.total_count || zipBrowseState.totalCount || zipBrowseState.features.length;
-    zipBrowseState.batchSize  = bProps.batch_size  || zipBrowseState.batchSize  || 30;
-    lastMapData = {
-      type:'FeatureCollection',
-      features: zipBrowseState.features.slice(),
-      properties: Object.assign({}, bProps)
-    };
-    const loaded = zipBrowseState.features.length;
-    document.getElementById('feat-count').textContent = `${loaded} feature(s)`;
-    document.getElementById('map-status').textContent = zipBrowseState.hasMore
-      ? `Loaded ${loaded} of ${zipBrowseState.totalCount} ZIP boundaries`
-      : `Loaded all ${loaded} ZIP boundaries`;
-  }catch(e){
-    document.getElementById('map-status').textContent = `ZIP lazy load error: ${e.message}`;
-    zipBrowseState.hasMore = false;
-  }finally{
-    if(zipBrowseState) zipBrowseState.loading = false;
-  }
-}
-
-function startZipBrowse(geojson){
-  const props = geojson.properties || {};
-  resetZipBrowse();
-  zipBrowseState = {
-    city:       props.city,
-    state:      props.state,
-    batchSize:  props.batch_size  || 30,
-    totalCount: props.total_count || (geojson.features || []).length,
-    hasMore:    !!props.has_more,
-    loading:    false,
-    timer:      null,
-    loadedZips: new Set(),
-    features:   []
-  };
-
-  zipBrowseLayer = L.geoJSON({ type:'FeatureCollection', features:[] }, {
-    filter: f => !isPoint(f),
-    style: ()=>({ color:'#1d4ed8', weight:3, opacity:1, fill:true, fillColor:'#1d4ed8', fillOpacity:0.08 }),
-    onEachFeature: bindPopup
-  }).addTo(map);
-
-  const initialFeatures = geojson.features || [];
-  if(initialFeatures.length){
-    initialFeatures.forEach(f => {
-      const z = f && f.properties && f.properties.ZIP;
-      if(z) zipBrowseState.loadedZips.add(z);
-    });
-    zipBrowseState.features = initialFeatures.slice();
-    zipBrowseLayer.addData({ type:'FeatureCollection', features: initialFeatures });
-    try{
-      const b = zipBrowseLayer.getBounds();
-      if(b.isValid()) map.fitBounds(b, {padding:[30,30], maxZoom:13});
-    }catch(e){}
-  }
-
-  const loaded = zipBrowseState.features.length;
-  document.getElementById('feat-count').textContent = `${loaded} feature(s)`;
-  document.getElementById('map-status').textContent = zipBrowseState.hasMore
-    ? `Loaded ${loaded} of ${zipBrowseState.totalCount} ZIP boundaries`
-    : `Loaded all ${loaded} ZIP boundaries`;
-
-  map.on('moveend', queueZipBrowseLoad);
-  if(zipBrowseState.hasMore) queueZipBrowseLoad();
-}
-
-function showMap(geojson){
-  const props         = geojson.properties || {};
-  const colorByType   = !!props.color_by_type;
-  const heatFill      = !!props.heat_fill;
-  const saRings       = !!props.sa_rings;
-  const boundaryType  = props.boundary_type || null;
-  const weatherAlerts = !!props.weather_alerts;
-  const lazyZipBrowse = !!props.lazy_zip_browse;
-  const usedLabels    = new Set();
-  const features      = geojson.features || [];
-
-  if(lazyZipBrowse){
-    startZipBrowse(geojson);
-    return;
-  }
-  resetZipBrowse();
-  // SA-ring polygons (break_minutes set) from containment responses don't count
-  // as "new" polygons — they are SA outlines we already have on the map.
-  const hasNewPolygons = features.some(
-    f => !isPoint(f) && !(f.properties && f.properties.break_minutes != null)
-  );
-  const preserveSaPolys = !saRings && !hasNewPolygons && !!polyLayer && !!haloLayer && !!polyLayer._saPersistent;
-
-  if(!preserveSaPolys){
-    if(haloLayer)  map.removeLayer(haloLayer);
-    if(polyLayer)  map.removeLayer(polyLayer);
-    if(noaaLayer) map.removeLayer(noaaLayer);
-    noaaLayer = null;
-  }
-  if(zipBrowseLayer) { map.removeLayer(zipBrowseLayer); zipBrowseLayer = null; }
-  if(pointLayer) map.removeLayer(pointLayer);
-  if(routeStopLayer) map.removeLayer(routeStopLayer);
-  routeStopLayer = L.layerGroup();
-
-
-  // ── Boundary colors per type ──────────────────────────────────────────────
-  const BCLR = {
-    zip:'#1d4ed8', state:'#3b82f6', county:'#f97316', district:'#22c55e',
-    area:'#84cc16', log_division:'#a855f7', log_region:'#8b5cf6',
-    proc_division:'#06b6d4', proc_region:'#0ea5e9', zip3:'#1d4ed8',
-    congressional:'#ec4899', retail_area:'#f43f5e'
-  };
-
-  if(!preserveSaPolys){
-  if(saRings){
-    // ── SA drive-time rings: per-feature colored halo + fill ─────────────
-    haloLayer = L.geoJSON(geojson, {
-      filter: f => !isPoint(f),
-      style: f => {
-        const c = (f.properties && f.properties.color) || '#06b6d4';
-        return { color:c, weight:12, opacity:0.22, fill:false, interactive:false };
-      }
-    }).addTo(map);
-    haloLayer._saPersistent = true;
-    polyLayer = L.geoJSON(geojson, {
-      filter: f => !isPoint(f),
-      style: f => {
-        const c = (f.properties && f.properties.color) || '#06b6d4';
-        return { color:c, weight:3, opacity:1, fill:true, fillColor:c, fillOpacity:0.12 };
-      },
-      onEachFeature: bindPopup
-    }).addTo(map);
-    polyLayer._saPersistent = true;
-
-  } else if(boundaryType){
-    // ── Named boundary: ZIP/ZIP3 = no fill, thick outline; others = light fill
-    const clr = props.user_color || BCLR[boundaryType] || '#60a5fa';
-    const isZipBdy = boundaryType === 'zip' || boundaryType === 'zip3';
-    haloLayer = L.geoJSON(geojson, {
-      filter: f => !isPoint(f),
-      style: ()=>({ color:'#ffffff', weight:isZipBdy ? 11 : 6, opacity:0.55, fill:false, interactive:false })
-    }).addTo(map);
-    polyLayer = L.geoJSON(geojson, {
-      filter: f => !isPoint(f),
-      style: ()=>({ color:clr, weight:isZipBdy ? 5 : 2.5, opacity:1,
-                    fill:!isZipBdy, fillColor:clr, fillOpacity:isZipBdy ? 0 : 0.08 }),
-      onEachFeature: bindPopup
-    }).addTo(map);
-
-  } else if(weatherAlerts){
-    // ── NWS weather alerts: render alert polygons from GeoJSON using severity color ──
-    haloLayer = L.geoJSON(geojson, {
-      filter: f => !isPoint(f),
-      style: f => {
-        const c = (f.properties && f.properties._color) || '#fbbf24';
-        return { color:'#ffffff', weight:6, opacity:0.5, fill:false, interactive:false };
-      }
-    }).addTo(map);
-    polyLayer = L.geoJSON(geojson, {
-      filter: f => !isPoint(f),
-      style: f => {
-        const c = (f.properties && f.properties._color) || '#fbbf24';
-        return { color:c, weight:2.5, opacity:1, fill:true, fillColor:c, fillOpacity:0.25 };
-      },
-      onEachFeature: bindPopup
-    }).addTo(map);
-    // NOAA official symbology layer as supplemental overlay (loads if network allows)
-    try {
-      noaaLayer = L.esri.dynamicMapLayer({
-        url: 'https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA/watch_warn_adv/MapServer',
-        opacity: 0.5,
-        attribution: 'NWS/NOAA'
-      }).addTo(map);
-    } catch(e){}
+  const mapHost = document.getElementById('map');
+  const mapDiv = document.createElement('div');
+  mapDiv.id = 'map';
+  mapDiv.style.width = '100%';
+  mapDiv.style.height = '100%';
+  if(mapHost && mapHost.parentNode){
+    mapHost.parentNode.replaceChild(mapDiv, mapHost);
   } else {
-    // ── Default: white halo + red / heat polygon ─────────────────────────
-    haloLayer = L.geoJSON(geojson, {
-      filter: f => !isPoint(f),
-      style: ()=>({ color:'#ffffff', weight:7, opacity:0.65, fill:false, interactive:false })
-    }).addTo(map);
-    polyLayer = L.geoJSON(geojson, {
-      filter: f => !isPoint(f),
-      style: f => {
-        if(heatFill){
-          const op = (f.properties && f.properties.fill_opacity != null)
-            ? f.properties.fill_opacity : 0.40;
-          const t = Math.max(0, Math.min(1, (op - 0.12) / 0.60));
-          const cr = Math.round(252 + t * (220 - 252));
-          const cg = Math.round(165 + t * (38  - 165));
-          const cb = Math.round(165 + t * (38  - 165));
-          return { color:'#991b1b', weight:2, opacity:0.9, fill:true,
-                   fillColor:`rgb(${cr},${cg},${cb})`, fillOpacity:0.85 };
-        }
-        const uClr = props.user_color || (f.properties && f.properties._color);
-        if(uClr)
-          return { color:uClr, weight:4, opacity:1, fill:true, fillColor:uClr, fillOpacity:0.15 };
-        return { color:'#ff1a1a', weight:4, opacity:1, fill:false };
-      },
-      onEachFeature: bindPopup
-    }).addTo(map);
+    document.getElementById('map-wrap').appendChild(mapDiv);
   }
-  } // end if(!preserveSaPolys)
 
-  pointLayer = makeClusterGroup();
-  L.geoJSON(geojson, {
-    filter: f => isPoint(f),
-    pointToLayer:(f,ll)=>{
-      const isBox = (f.properties||{})._layer === 'boxes';
-      const pin = colorByType ? resolvePin(f) : { color:DEFAULT_PIN_COLOR, label:DEFAULT_PIN_LABEL };
-      if(colorByType) usedLabels.add(isBox ? 'Collection Box' : pin.label);
-      const icon = isBox ? makeBoxIcon(pin.color || '#16a34a') : makeIcon(pin.color);
-      return L.marker(ll, { icon });
-    },
-    onEachFeature: bindPopup
-  }).addTo(pointLayer);
-  pointLayer.addTo(map);
-
-  // ── Route stop markers: numbered circles at origin/destination ───────────
-  (geojson.features || []).forEach(f => {
-    if(!f.geometry || !f.properties) return;
-    const gtype = f.geometry.type;
-    const hasRoute = f.properties.route || f.properties.origin_match || f.properties.destination_match;
-    if(!hasRoute) return;
-    let coords = [];
-    if(gtype === 'LineString') coords = f.geometry.coordinates;
-    else if(gtype === 'MultiLineString') coords = f.geometry.coordinates.flat();
-    if(coords.length < 2) return;
-    const start = coords[0];
-    const end = coords[coords.length - 1];
-    const sz = 30;
-    const startIcon = L.divIcon({
-      html: `<div class="route-stop start" style="width:${sz}px;height:${sz}px">1</div>`,
-      className: '', iconSize:[sz,sz], iconAnchor:[sz/2,sz/2]
-    });
-    const endIcon = L.divIcon({
-      html: `<div class="route-stop end" style="width:${sz}px;height:${sz}px">2</div>`,
-      className: '', iconSize:[sz,sz], iconAnchor:[sz/2,sz/2]
-    });
-    L.marker([start[1],start[0]], {icon:startIcon})
-      .bindPopup(`<div style="color:#222;font-size:12px"><b>Start:</b> ${f.properties.origin_match||'Origin'}</div>`)
-      .addTo(routeStopLayer);
-    L.marker([end[1],end[0]], {icon:endIcon})
-      .bindPopup(`<div style="color:#222;font-size:12px"><b>End:</b> ${f.properties.destination_match||'Destination'}</div>`)
-      .addTo(routeStopLayer);
+  const view = new MapView({
+    container: mapDiv,
+    map,
+    extent: { xmin: -125.0, ymin: 24.4, xmax: -66.9, ymax: 49.4, spatialReference: { wkid: 4326 } },
+    ui: { components: ['zoom', 'attribution'] }
   });
-  if(routeStopLayer.getLayers().length) routeStopLayer.addTo(map);
 
-  // ── Legend dispatch ───────────────────────────────────────────────────────
-  if(saRings)             buildSaLegend(geojson.features || []);
-  else if(heatFill)       buildHeatLegend(geojson.features || []);
-  else if(colorByType)    buildLegend(usedLabels);
-  else if(boundaryType)   buildBoundaryLegend(boundaryType, geojson.features || []);
-  else if(weatherAlerts)  buildWeatherLegend(geojson.features || []);
-  else if(!preserveSaPolys) document.getElementById('legend').style.display='none';
-
-  // ── Fit map to extent of all displayed geography ──────────────────────
-  let bounds = null;
-  let polyBounds = null;
-  try { if(pointLayer.getLayers().length) bounds = pointLayer.getBounds(); } catch(e){}
-  try {
-    const pb = polyLayer.getBounds();
-    if(pb.isValid()){
-      polyBounds = pb;
-      if(!preserveSaPolys || !bounds) bounds = bounds ? bounds.extend(pb) : pb;
-    }
-  } catch(e){}
-  if(bounds && bounds.isValid()){
-    const nPts = pointLayer.getLayers().length;
-    if(nPts === 1 && (!polyBounds || preserveSaPolys)){
-      // Single point, or point-only follow-up with preserved service area — zoom in close
-      map.setView(bounds.getCenter(), 15);
-    } else {
-      // Fit to the full extent; maxZoom:17 allows tight zoom on small geographies
-      map.fitBounds(bounds, {padding:[30,30], maxZoom:17});
-    }
-  }
-
-  const n = geojson.features ? geojson.features.length : 0;
-  document.getElementById('feat-count').textContent = n+' feature(s)';
-  document.getElementById('map-status').textContent = 'Results displayed';
-}
-
-async function ask(){
-  const input=document.getElementById('q');
-  const text=input.value.trim();
-  if(!text)return;
-  input.value='';
-  addMsg(text,'user');
-  const btn=document.getElementById('btn');
-  btn.disabled=true;
-  document.getElementById('map-status').textContent='Processing...';
-  addThinking();
-
-  const historySnapshot = conversationHistory.slice();
-  pushHistory('user', text);
-
-  try{
-    const res=await fetch('/api/chat',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({question:text, history: historySnapshot})
-    });
-    const raw=await res.text();
-    let data;
-    try{
-      data=JSON.parse(raw);
-    }catch(parseErr){
-      throw new Error(`Server returned invalid JSON (${res.status}): ${raw.slice(0,200)}`);
-    }
-    if(!res.ok){
-      throw new Error(data.answer || data.detail || `Request failed with status ${res.status}`);
-    }
-    removeThinking();
-    addMsg(data.answer,'bot',data.sources);
-    pushHistory('assistant', data.answer);
-    if(data.map_data){
-      if(data.map_data.properties && data.map_data.properties.restyle_only && lastMapData){
-        // User requested a style change with no new data — re-render last layer with merged style
-        const reStyled = Object.assign({}, lastMapData);
-        reStyled.properties = Object.assign({}, reStyled.properties || {}, data.map_data.properties);
-        delete reStyled.properties.restyle_only;
-        showMap(reStyled);
-      } else {
-        lastMapData = data.map_data;
-        showMap(data.map_data);
+  // Click a cluster → zoom to its expansion level
+  view.when(() => {
+    // Force CONUS extent — constructor extent is unreliable when container is zero-sized at parse time
+    view.goTo(new Extent({xmin:-125.0,ymin:24.4,xmax:-66.9,ymax:49.4,spatialReference:{wkid:4326}})).catch(()=>{});
+    view.on('click', async (evt) => {
+      if(!pointLayer) return;
+      const hit = await view.hitTest(evt, {include:[pointLayer]});
+      const g = hit.results[0]?.graphic;
+      if(!g) return;
+      if(g.isAggregate) {
+        evt.stopPropagation();
+        view.popup.close();
+        try {
+          const zoom = await pointLayer.getFeatureReduction().queryClusterExpansionZoom({graphic:g});
+          view.goTo({target:g.geometry, zoom:Math.min(zoom,18)}, {duration:400});
+        } catch(e) {
+          view.goTo({target:g.geometry, zoom:view.zoom+3}, {duration:400});
+        }
+        return;
       }
-    } else {
-      document.getElementById('map-status').textContent='No spatial data in response';
-    }
-  }catch(e){
-    removeThinking();
-    addMsg('Error: '+e.message,'bot');
+    });
+  });
+
+  const BASEMAP_IDS = { osm: 'osm', imagery: 'satellite', topo: 'topo-vector' };
+  const POPUP_SKIP = new Set(['marker-color','marker-symbol','marker-size','layer','fill_opacity','_color','_pin_color','color','_severity','_layer','description','instruction','_marker_shape','user_color','user_shape','_pin_label','label']);
+  const POPUP_LABELS = {
+    BOX_NBR:'Box Number', BOX_ADDRESS:'Box Address', BOX_TYPE:'Box Type', BOX_LOCATION_DESCRIPTION:'Location Description',
+    LOCATION_TYPE:'Location Type', LOCALE_NAME:'Facility Name', FACILITY_TYPE:'Facility Type', FACILITY:'Facility', ADDRESS:'Address',
+    CITY:'City', STATE:'State', ZIP:'ZIP Code', ZIP3:'ZIP3 Area', ZIP5:'ZIP Code', ZIP_CODE:'ZIP Code', AREA_NAME:'Area Name',
+    DIST_NAME:'District Name', DISTRICT_NAME:'District Name', DISTRICTID:'District ID', break_minutes:'Drive Time',
+    service_area_label:'Service Area', count:'Count', cnt:'Count', rank:'Rank', route:'Route', origin_match:'Start',
+    destination_match:'Destination', travel_time_min:'Estimated Drive Time', travel_distance_mi:'Estimated Driving Distance',
+    event:'Alert Type', severity:'Severity', urgency:'Urgency', certainty:'Certainty', headline:'Headline', areaDesc:'Affected Area',
+    effective:'Effective', expires:'Expires'
+  };
+
+  function pushHistory(role, content){
+    conversationHistory.push({ role, content });
+    if (conversationHistory.length > MAX_HISTORY) conversationHistory.splice(0, conversationHistory.length - MAX_HISTORY);
   }
-  btn.disabled=false;
-}
+
+  function titleCaseWord(word){
+    if(!word) return word;
+    if(/^\d+$/.test(word) || /^[A-Z0-9&-]{2,}$/.test(word)) return word;
+    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+  }
+
+  function formatPopupLabel(key){
+    if(POPUP_LABELS[key]) return POPUP_LABELS[key];
+    return String(key).split('_').filter(Boolean).map(titleCaseWord).join(' ');
+  }
+
+  function formatPopupValue(value){
+    if(value == null) return '';
+    if(typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toLocaleString(undefined, {maximumFractionDigits:2});
+    if(typeof value !== 'string') return String(value);
+    if(/^https?:\/\//i.test(value)) return value;
+    return value.split('_').map(part => titleCaseWord(part)).join(' ');
+  }
+
+  function popupContent(props){
+    if(!props) return '';
+    const entries = Object.entries(props).filter(([k,v]) => !POPUP_SKIP.has(k) && v != null && v !== '');
+    if(!entries.length) return '';
+    return entries.map(([k,v]) => `<b>${formatPopupLabel(k)}:</b> ${formatPopupValue(v)}`).join('<br>');
+  }
+
+  function addMsg(text,role,sources){
+    const d=document.createElement('div');
+    d.className='msg '+role;
+    d.textContent=text;
+    if(sources&&sources.length){
+      const s=document.createElement('div');
+      s.className='sources';
+      s.textContent='Sources: '+sources.join(', ');
+      d.appendChild(s);
+    }
+    document.getElementById('messages').appendChild(d);
+    document.getElementById('messages').scrollTop=999999;
+    return d;
+  }
+
+  function addThinking(){
+    const d=document.createElement('div');
+    d.className='msg thinking';
+    d.id='thinking-msg';
+    d.innerHTML='Querying data sources<span class="dots"></span>';
+    document.getElementById('messages').appendChild(d);
+    document.getElementById('messages').scrollTop=999999;
+    let step=0;
+    const phrases=['Querying data sources','Analyzing results','Building map data','Almost there'];
+    d._interval=setInterval(()=>{
+      step++;
+      if(step<phrases.length) d.innerHTML=phrases[step]+'<span class="dots"></span>';
+    },8000);
+    return d;
+  }
+
+  function removeThinking(){
+    const d=document.getElementById('thinking-msg');
+    if(d){ clearInterval(d._interval); d.remove(); }
+  }
+
+  function activateBasemapButton(name){
+    document.querySelectorAll('.bm-btn').forEach(b => b.classList.remove('active'));
+    const btn = Array.from(document.querySelectorAll('.bm-btn')).find(b => {
+      const t = b.textContent.trim().toLowerCase();
+      return (name === 'osm' && t === 'map') || (name === 'imagery' && t === 'satellite') || (name === 'topo' && t === 'topo');
+    });
+    if(btn) btn.classList.add('active');
+  }
+
+  function setBasemap(name){
+    if(name === currentBasemap) return;
+    map.basemap = BASEMAP_IDS[name];
+    currentBasemap = name;
+    activateBasemapButton(name);
+  }
+  window.setBasemap = setBasemap;
+
+  function makePinSymbol(color, size){
+    size = size || 14;
+    return {
+      type: 'simple-marker',
+      style: 'path',
+      // Classic Esri teardrop pin — tip at bottom, circle body at top
+      path: 'M16,3.5c-4.142,0-7.5,3.358-7.5,7.5c0,4.143,7.5,18.121,7.5,18.121S23.5,15.143,23.5,11C23.5,6.858,20.143,3.5,16,3.5z M16,14.584c-2.229,0-4.038-1.811-4.038-4.084c0-2.273,1.809-4.083,4.038-4.083s4.038,1.811,4.038,4.083C20.038,12.773,18.229,14.584,16,14.584z',
+      color: color,
+      size: size,
+      outline: { color: 'white', width: 1 },
+      yoffset: Math.round(size * 0.45)  // anchor tip to the map coordinate
+    };
+  }
+
+function simplePointSymbol(props){
+    const color = (props && props._color) || '#003399';
+    return { type:'simple-marker', style:'circle', color:color, size:12, outline:{color:'#ffffff', width:1.5} };
+  }
+  function simpleLineSymbol(props){
+    return { type:'simple-line', color:(props && props._color) || '#ff1a1a', width:3 };
+  }
+
+  function simpleFillSymbol(props){
+    // Heat map ZIPs (from zip_ranking) → filled blue shading by rank
+    if(props && props.rank != null && props.count != null){
+      const rank = props.rank;
+      const alpha = Math.max(0.25, 1.0 - (rank - 1) * 0.15);
+      return { type:'simple-fill', color:[0,51,153,alpha], outline:{ color:'#003399', width:2.5 } };
+    }
+    // Regular ZIP / ZIP3 boundaries → blue outline only, no fill
+    if(props && (props.ZIP != null || props.ZIP3 != null || props.zip_code != null)){
+      return { type:'simple-fill', color:[0,0,0,0], outline:{ color:'#003399', width:2.5 } };
+    }
+    const color = (props && props._color) || (props && props.color) || (props && props.user_color) || '#ff1a1a';
+    const alpha = props && props.fill_opacity != null ? Math.max(0.05, Math.min(0.9, props.fill_opacity)) : 0.15;
+    return {
+      type:'simple-fill',
+      color:[parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16), alpha],
+      outline:{ color, width:2 }
+    };
+  }
+
+  function addGraphic(geometry, props){
+    if(!geometry) return;
+    let symbol;
+    if(geometry.type === 'point') symbol = simplePointSymbol(props);
+    else if(geometry.type === 'polyline') symbol = simpleLineSymbol(props);
+    else symbol = simpleFillSymbol(props);
+    resultsLayer.add(new Graphic({
+      geometry,
+      symbol,
+      attributes: props || {},
+      popupTemplate: popupContent(props) ? { title: props && (props.label || props.LOCALE_NAME || props.BOX_NBR || props.ZIP || 'Result'), content: popupContent(props) } : null
+    }));
+  }
+
+  function addFeature(feature){
+    if(!feature || !feature.geometry) return;
+    const g = feature.geometry;
+    const props = feature.properties || {};
+    if(g.type === 'Point') {
+      addGraphic({ type:'point', longitude:g.coordinates[0], latitude:g.coordinates[1] }, props);
+    } else if(g.type === 'MultiPoint') {
+      (g.coordinates || []).forEach(c => addGraphic({ type:'point', longitude:c[0], latitude:c[1] }, props));
+    } else if(g.type === 'LineString') {
+      addGraphic({ type:'polyline', paths:[g.coordinates], spatialReference:{ wkid:4326 } }, props);
+    } else if(g.type === 'MultiLineString') {
+      addGraphic({ type:'polyline', paths:g.coordinates, spatialReference:{ wkid:4326 } }, props);
+    } else if(g.type === 'Polygon') {
+      addGraphic({ type:'polygon', rings:g.coordinates, spatialReference:{ wkid:4326 } }, props);
+    } else if(g.type === 'MultiPolygon') {
+      (g.coordinates || []).forEach(poly => addGraphic({ type:'polygon', rings:poly[0], spatialReference:{ wkid:4326 } }, props));
+    }
+  }
+
+  // ── Pin types + legend helpers ─────────────────────────────────────────────────────────────
+  const PIN_TYPES = [
+    { match:['p&dc','pdc','processing','distribution'], color:'#1d4ed8', label:'P&DC / Processing' },
+    { match:['post office','post_office'],              color:'#dc2626', label:'Post Office'       },
+    { match:['collection box','collection_box','box','_box_layer'], color:'#16a34a', label:'Collection Box' },
+    { match:['annex','adc','aadc'],                     color:'#7c3aed', label:'Annex / ADC'      },
+    { match:['carrier','cfs','station'],                color:'#ea580c', label:'Carrier / Station' },
+  ];
+  const DEFAULT_PIN_COLOR = '#06b6d4';
+  const DEFAULT_PIN_LABEL = 'Other';
+
+  function isPoint(f){ const t = f.geometry && f.geometry.type; return t === 'Point' || t === 'MultiPoint'; }
+  function resolvePin(feature){ const p = feature.properties || {}; const raw = (p.type || p.facility_type || p.feature_type || '').toLowerCase(); if(raw) for(const pt of PIN_TYPES) if(pt.match.some(m => raw.includes(m))) return pt; return { color: DEFAULT_PIN_COLOR, label: DEFAULT_PIN_LABEL }; }
+  function normalizeZipLegendLabel(v){ const s = String(v ?? '').trim(); const m = s.match(/^(\d{5})(?:\s*-.*)?$/); return m ? m[1] : s; }
+
+  function buildLegend(usedLabels){ const el = document.getElementById('legend'); if(!usedLabels.size){ el.style.display='none'; return; } el.innerHTML = [...PIN_TYPES, { color:DEFAULT_PIN_COLOR, label:DEFAULT_PIN_LABEL }].filter(pt => usedLabels.has(pt.label)).map(pt => `<div class="legend-row"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 36" width="14" height="21"><path d="M12 0C5.37 0 0 5.37 0 12c0 6.63 12 24 12 24S24 18.63 24 12C24 5.37 18.63 0 12 0z" fill="${pt.color}" stroke="rgba(0,0,0,0.2)" stroke-width="1"/><circle cx="12" cy="12" r="5" fill="white" opacity="0.85"/></svg><span>${pt.label}</span></div>`).join(''); el.style.display='block'; }
+  function buildHeatLegend(features){ const el = document.getElementById('legend'); if(!features||!features.length){ el.style.display='none'; return; } const seenZips=new Set(); const sorted=[...features].filter(f=>f.properties&&f.properties.rank).sort((a,b)=>a.properties.rank-b.properties.rank).filter(f=>{ const z=normalizeZipLegendLabel(f.properties.zip_code); if(seenZips.has(z)) return false; seenZips.add(z); return true; }); if(!sorted.length){ el.style.display='none'; return; } el.innerHTML=`<div style="font-weight:600;margin-bottom:4px">Count by ZIP</div>`+sorted.map(f=>{ const p=f.properties; const rank=p.rank||1; const alpha=Math.max(0.25, 1.0-(rank-1)*0.15); return `<div class="legend-row"><div style="width:14px;height:14px;border-radius:2px;background:rgba(0,51,153,${alpha});border:1px solid #003399"></div><span>#${p.rank} ZIP ${normalizeZipLegendLabel(p.zip_code)} — ${p.count}</span></div>`; }).join(''); el.style.display='block'; }
+  function buildSaLegend(features){ const el=document.getElementById('legend'); const rings=[],seen=new Set(); (features||[]).forEach(f=>{ if(!isPoint(f)&&f.properties){ const bk=String(f.properties.break_minutes??''); const c=f.properties.color||'#06b6d4'; if(bk&&!seen.has(bk)){seen.add(bk);rings.push({bk,c});} } }); if(!rings.length){el.style.display='none';return;} rings.sort((a,b)=>Number(a.bk)-Number(b.bk)); el.innerHTML='<div style="font-weight:600;margin-bottom:4px">Drive-Time Rings</div>'+rings.map(r=>`<div class="legend-row"><svg width="18" height="12"><rect x="1" y="2" width="16" height="8" rx="2" fill="${r.c}" fill-opacity="0.18" stroke="${r.c}" stroke-width="2.5"/></svg> <span>${r.bk} min</span></div>`).join(''); el.style.display='block'; }
+  function buildBoundaryLegend(bt,features){ const el=document.getElementById('legend'); const BCLR={zip:'#1d4ed8',state:'#3b82f6',county:'#f97316',district:'#22c55e',area:'#84cc16',log_division:'#a855f7',log_region:'#8b5cf6',proc_division:'#06b6d4',proc_region:'#0ea5e9',zip3:'#1d4ed8',congressional:'#ec4899',retail_area:'#f43f5e'}; const BLBL={zip:'ZIP Code',state:'State',county:'County',district:'USPS District',area:'USPS Area',log_division:'Logistics Division',log_region:'Logistics Region',proc_division:'Processing Division',proc_region:'Processing Region',zip3:'ZIP3 Area',congressional:'Congressional District',retail_area:'Retail Delivery Area'}; const clr=BCLR[bt]||'#60a5fa'; const lbl=BLBL[bt]||bt; const names=[...new Set((features||[]).filter(f=>!isPoint(f)).map(f=>f.properties&&Object.values(f.properties)[0]).filter(Boolean).map(v=>bt==='zip'?normalizeZipLegendLabel(v):v))].slice(0,3).join(', '); el.innerHTML=`<div style="font-weight:600;margin-bottom:4px">${lbl}</div><div class="legend-row"><svg width="18" height="12"><rect x="1" y="2" width="16" height="8" rx="2" fill="${clr}" fill-opacity="0.15" stroke="${clr}" stroke-width="2.5"/></svg><span style="font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis">${names||lbl}</span></div>`; el.style.display='block'; }
+  function buildWeatherLegend(features){ const el=document.getElementById('legend'); el.innerHTML='<div style="font-weight:600;margin-bottom:4px">NWS Active Alerts</div><div class="legend-row" style="gap:4px"><span style="font-size:10px;color:#555">Official NOAA symbology</span></div><div class="legend-row" style="gap:4px"><a href="https://www.weather.gov/lwx/WarningsDefined" target="_blank" style="font-size:10px;color:#2563eb;text-decoration:underline">Alert color reference</a></div>'; const ptCount=(features||[]).filter(f=>isPoint(f)).length; if(ptCount) el.innerHTML+=`<div class="legend-row" style="margin-top:4px"><span style="font-size:10px">${ptCount} affected facilities shown</span></div>`; el.style.display='block'; }
+
+  // ── Route stops + clustering ───────────────────────────────────────────────────────────
+  function routeStopSymbol(label, isStart){ const fill = isStart ? '#16a34a' : '#dc2626'; const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30"><circle cx="15" cy="15" r="13" fill="${fill}" stroke="white" stroke-width="3"/><text x="15" y="20" text-anchor="middle" font-size="14" font-weight="700" fill="white">${label}</text></svg>`; return { type:'picture-marker', url:'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg), width:30, height:30 }; }
+  function addRouteStops(features){ for(const f of features){ if(!f.geometry||!f.properties) continue; const hasRoute=f.properties.route||f.properties.origin_match||f.properties.destination_match; if(!hasRoute) continue; let coords=[]; if(f.geometry.type==='LineString') coords=f.geometry.coordinates; else if(f.geometry.type==='MultiLineString') coords=(f.geometry.coordinates||[]).flat(); if(coords.length<2) continue; const s=coords[0],e=coords[coords.length-1]; resultsLayer.add(new Graphic({ geometry:{type:'point',longitude:s[0],latitude:s[1]}, symbol:routeStopSymbol('1',true), popupTemplate:{title:'Start',content:`<div style="color:#222;font-size:12px"><b>Start:</b> ${f.properties.origin_match||'Origin'}</div>`} })); resultsLayer.add(new Graphic({ geometry:{type:'point',longitude:e[0],latitude:e[1]}, symbol:routeStopSymbol('2',false), popupTemplate:{title:'End',content:`<div style="color:#222;font-size:12px"><b>End:</b> ${f.properties.destination_match||'Destination'}</div>`} })); } }
+  function buildPointLayer(pointFeatures, colorByType){ if(pointBlobUrl){URL.revokeObjectURL(pointBlobUrl);pointBlobUrl=null;} const tagged=colorByType?pointFeatures.map(f=>{const pin=resolvePin(f);return Object.assign({},f,{properties:Object.assign({},f.properties,{_pin_label:pin.label,_pin_color:pin.color})});}):pointFeatures; pointBlobUrl=URL.createObjectURL(new Blob([JSON.stringify({type:'FeatureCollection',features:tagged})],{type:'application/json'})); return new GeoJSONLayer({ url:pointBlobUrl, renderer:colorByType?{type:'unique-value',field:'_pin_label',defaultSymbol:{type:'simple-marker',style:'circle',color:'#003399',size:12,outline:{color:'#ffffff',width:1.5}},uniqueValueInfos:PIN_TYPES.map(pt=>({value:pt.label,symbol:{type:'simple-marker',style:'circle',color:pt.color,size:12,outline:{color:'#ffffff',width:1.5}}}))}:{type:'simple',symbol:{type:'simple-marker',style:'circle',color:'#003399',size:12,outline:{color:'#ffffff',width:1.5}}}, featureReduction:{type:'cluster',clusterRadius:'40px',maxScale:3000,popupEnabled:false,renderer:{type:'class-breaks',field:'cluster_count',defaultSymbol:{type:'simple-marker',color:'#003399',size:36,outline:{color:'#ffffff',width:4}},classBreakInfos:[{minValue:1,maxValue:1,symbol:{type:'simple-marker',style:'circle',color:'#003399',size:12,outline:{color:'#ffffff',width:1.5}}},{minValue:2,maxValue:9,symbol:{type:'simple-marker',color:'#003399',size:28,outline:{color:'#ffffff',width:3}}},{minValue:10,maxValue:99,symbol:{type:'simple-marker',color:'#003399',size:40,outline:{color:'#ffffff',width:4}}},{minValue:100,maxValue:1000000000,symbol:{type:'simple-marker',color:'#003399',size:56,outline:{color:'#ffffff',width:5}}}]},labelingInfo:[{deconflictionStrategy:'none',labelExpressionInfo:{expression:'IIF($feature.cluster_count > 1, Text($feature.cluster_count, "#,###"), "")'},symbol:{type:'text',color:'#fff',haloColor:'rgba(0,0,0,0.4)',haloSize:'1.5px',font:{size:'11px',weight:'bold'}},labelPlacement:'center-center'}]}, popupTemplate:{title:'{label}',outFields:['*'],content:(ctx)=>popupContent(ctx.graphic.attributes)} }); }
+
+  // ── showMap ──────────────────────────────────────────────────────────────────────
+  async function showMap(geojson){
+    resultsLayer.removeAll();
+    if(pointLayer){ map.remove(pointLayer); pointLayer=null; }
+    const features=(geojson&&geojson.features)||[];
+    const props=(geojson&&geojson.properties)||{};
+    const colorByType=!!props.color_by_type, heatFill=!!props.heat_fill, saRings=!!props.sa_rings;
+    const boundaryType=props.boundary_type||null, weatherAlerts=!!props.weather_alerts;
+    if(props.lazy_zip_browse) document.getElementById('map-status').textContent='ZIP lazy browse not yet wired in Esri version';
+    const pointFeats=features.filter(f=>f.geometry&&(f.geometry.type==='Point'||f.geometry.type==='MultiPoint'));
+    const otherFeats=features.filter(f=>!f.geometry||(f.geometry.type!=='Point'&&f.geometry.type!=='MultiPoint'));
+    otherFeats.forEach(addFeature);
+    addRouteStops(features);
+    const usedLabels=new Set();
+    if(colorByType) pointFeats.forEach(f=>{const pin=resolvePin(f); usedLabels.add((f.properties||{})._layer==='boxes'?'Collection Box':pin.label);});
+    if(pointFeats.length){pointLayer=buildPointLayer(pointFeats,colorByType);map.add(pointLayer);}
+    document.getElementById('feat-count').textContent=features.length+' feature(s)';
+    document.getElementById('map-status').textContent=features.length?'Results displayed':'No spatial features';
+    if(saRings)            buildSaLegend(features);
+    else if(heatFill)      buildHeatLegend(features);
+    else if(colorByType)   buildLegend(usedLabels);
+    else if(boundaryType)  buildBoundaryLegend(boundaryType,features);
+    else if(weatherAlerts) buildWeatherLegend(features);
+    else                   document.getElementById('legend').style.display='none';
+    // Zoom: let Esri compute extent from rendered graphics (reliable for polygons/lines);
+    // fall back to raw-coord bbox for point-only responses (GeoJSONLayer not yet in resultsLayer)
+    const grfx = resultsLayer.graphics.toArray();
+    if(grfx.length && !pointFeats.length){
+      // Raw-coord bbox — more reliable than goTo(graphics) for polygons/lines
+      const ac=features.flatMap(f=>{if(!f.geometry)return[];const g=f.geometry;if(g.type==='Polygon')return g.coordinates[0]||[];if(g.type==='MultiPolygon')return(g.coordinates||[]).flatMap(p=>p[0]||[]);if(g.type==='LineString')return g.coordinates;if(g.type==='MultiLineString')return(g.coordinates||[]).flat();return[];});
+      if(ac.length){const lons=ac.map(c=>c[0]),lats=ac.map(c=>c[1]);try{await view.goTo(new Extent({xmin:Math.min(...lons),ymin:Math.min(...lats),xmax:Math.max(...lons),ymax:Math.max(...lats),spatialReference:{wkid:4326}}),{duration:800});}catch(e){}}
+    } else if(!grfx.length && pointFeats.length){
+      // Points only — bbox from raw coords (fullExtent unreliable on blob-URL GeoJSONLayer)
+      const lons=[],lats=[];
+      pointFeats.forEach(f=>{ const c=f.geometry.coordinates; if(f.geometry.type==='Point'){lons.push(c[0]);lats.push(c[1]);}else{c.forEach(p=>{lons.push(p[0]);lats.push(p[1]);});} });
+      if(lons.length===1){
+        try{await view.goTo({target:{type:'point',x:lons[0],y:lats[0],spatialReference:{wkid:4326}},zoom:14},{duration:800});}catch(e){}
+      }else if(lons.length>1){
+        try{await view.goTo(new Extent({xmin:Math.min(...lons),ymin:Math.min(...lats),xmax:Math.max(...lons),ymax:Math.max(...lats),spatialReference:{wkid:4326}}),{duration:800});}catch(e){}
+      }
+    } else if(grfx.length || pointFeats.length){
+      const ac=features.flatMap(f=>{if(!f.geometry)return[];const g=f.geometry;if(g.type==='Point')return[[g.coordinates[0],g.coordinates[1]]];if(g.type==='MultiPoint')return g.coordinates.map(c=>[c[0],c[1]]);if(g.type==='LineString')return g.coordinates;if(g.type==='MultiLineString')return(g.coordinates||[]).flat();if(g.type==='Polygon')return g.coordinates[0]||[];if(g.type==='MultiPolygon')return(g.coordinates||[]).map(p=>p[0]||[]).flat();return[];});
+      if(ac.length){const lons=ac.map(c=>c[0]),lats=ac.map(c=>c[1]);try{await view.goTo(new Extent({xmin:Math.min(...lons),ymin:Math.min(...lats),xmax:Math.max(...lons),ymax:Math.max(...lats),spatialReference:{wkid:4326}}),{duration:800});}catch(e){}}
+    }
+  }
+
+  async function ask(){
+    const input=document.getElementById('q');
+    const text=input.value.trim();
+    if(!text)return;
+    input.value='';
+    addMsg(text,'user');
+    const btn=document.getElementById('btn');
+    btn.disabled=true;
+    document.getElementById('map-status').textContent='Processing...';
+    addThinking();
+
+    const historySnapshot = conversationHistory.slice();
+    pushHistory('user', text);
+
+    try{
+      const res=await fetch('/api/chat',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({question:text, history: historySnapshot})
+      });
+      const raw=await res.text();
+      let data;
+      try{ data=JSON.parse(raw); }
+      catch(parseErr){ throw new Error(`Server returned invalid JSON (${res.status}): ${raw.slice(0,200)}`); }
+      if(!res.ok) throw new Error(data.answer || data.detail || `Request failed with status ${res.status}`);
+      removeThinking();
+      addMsg(data.answer,'bot',data.sources);
+      pushHistory('assistant', data.answer);
+      if(data.map_data){
+        if(data.map_data.properties && data.map_data.properties.restyle_only && lastMapData){
+          const reStyled = Object.assign({}, lastMapData);
+          reStyled.properties = Object.assign({}, reStyled.properties || {}, data.map_data.properties);
+          delete reStyled.properties.restyle_only;
+          lastMapData = reStyled;
+          showMap(reStyled);
+        } else {
+          lastMapData = data.map_data;
+          showMap(data.map_data);
+        }
+      } else {
+        document.getElementById('map-status').textContent='No spatial data in response';
+      }
+    }catch(e){
+      removeThinking();
+      addMsg('Error: '+e.message,'bot');
+    }
+    btn.disabled=false;
+  }
+  window.ask = ask;
+});
 </script>
 </body>
 </html>

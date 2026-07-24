@@ -16,6 +16,8 @@ env:
     valueFrom: user_pat
   - name: LLM_ENDPOINT
     value: "mas-33c3b825-endpoint"
+  - name: SQL_WAREHOUSE_ID
+    value: "d126d5143d18624e"
   - name: TBL_ZIP5
     value: "edlprod.geo_analytics.usps_zip5"
   - name: TBL_FACILITIES
