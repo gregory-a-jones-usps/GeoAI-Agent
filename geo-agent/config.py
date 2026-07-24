@@ -179,7 +179,7 @@ GA_SETUP = (
 )
 
 NORM_RINGS_FN = '''
-def _norm_rings(rings):
+def norm_rings(rings):
     try:
         if isinstance(rings[0][0][0], (int, float)):
             return rings
@@ -187,7 +187,7 @@ def _norm_rings(rings):
     except (IndexError, TypeError):
         return rings
 
-def _convert_ring(ring):
+def convert_ring(ring):
     import math as _math
     out = []
     for pt in ring:

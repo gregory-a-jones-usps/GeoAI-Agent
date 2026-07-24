@@ -891,7 +891,10 @@ class RealAgent:
             })
             answer_parts.append(f"{i}. {label} — {dist} mi")
 
-        map_data = {"type": "FeatureCollection", "features": features, "properties": {"color_by_type": True}} if features else None
+        map_props = {"color_by_type": True}
+        if zip_m:
+            map_props["boundary_type"] = "zip"
+        map_data = {"type": "FeatureCollection", "features": features, "properties": map_props} if features else None
         header = f"Nearest {top_n} {kind} to {ref_loc}:" if top_n > 1 else f"Nearest {kind} to {ref_loc}:"
         answer = header + "\n" + "\n".join(answer_parts)
         return GeoResponse(answer=answer, map_data=map_data, sources=["serverless-sql"])
@@ -1003,8 +1006,30 @@ class RealAgent:
                 layer = "facilities"
 
         cfg = LAYER_CONFIG.get(layer, LAYER_CONFIG["facilities"])
+        # Parse additional filter predicates from question
+        extra_filters = []
+        if layer == "businesses":
+            emp_m = re.search(r'(?:more than|over|greater than|exceeding|above)\s+(\d+)\s*(?:employee|emp)', q, re.I)
+            if emp_m:
+                extra_filters.append(f"EMPNUM > {emp_m.group(1)}")
+            emp_m2 = re.search(r'(?:at least|minimum|min)\s+(\d+)\s*(?:employee|emp)', q, re.I)
+            if emp_m2:
+                extra_filters.append(f"EMPNUM >= {emp_m2.group(1)}")
+            emp_m3 = re.search(r'(?:fewer than|less than|under|below)\s+(\d+)\s*(?:employee|emp)', q, re.I)
+            if emp_m3:
+                extra_filters.append(f"EMPNUM < {emp_m3.group(1)}")
+            emp_m4 = re.search(r'(\d+)\s*\+\s*(?:employee|emp)', q, re.I)
+            if emp_m4:
+                extra_filters.append(f"EMPNUM >= {emp_m4.group(1)}")
+            sales_m = re.search(r'(?:more than|over|greater than|exceeding|above)\s+\$?([\d,]+)\s*(?:sales|revenue)', q, re.I)
+            if sales_m:
+                extra_filters.append(f"SALESVOL > {sales_m.group(1).replace(',', '')}")
+            sales_m2 = re.search(r'(?:at least|minimum)\s+\$?([\d,]+)\s*(?:sales|revenue)', q, re.I)
+            if sales_m2:
+                extra_filters.append(f"SALESVOL >= {sales_m2.group(1).replace(',', '')}")
+        filter_clause = (' AND ' + ' AND '.join(extra_filters)) if extra_filters else ''
         # Query points (limit 5000 for display)
-        point_sql = f"SELECT {cfg['select_fields']} FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']} LIMIT 5000"
+        point_sql = f"SELECT {cfg['select_fields']} FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']}{filter_clause} LIMIT 5000"
         rows, error = self._run_serverless_sql(point_sql)
         if error:
             return GeoResponse(answer=f"Spatial lookup error: {error}", map_data=None, sources=["serverless-sql"])
@@ -1037,7 +1062,7 @@ class RealAgent:
 
         pts = len([f for f in features if f.get("geometry", {}).get("type") == "Point"])
         label = cfg.get("label", layer)
-        total_sql = f"SELECT COUNT(*) AS cnt FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']}"
+        total_sql = f"SELECT COUNT(*) AS cnt FROM {cfg['table']} WHERE {cfg['zip_col']} = '{zip_code}' AND {cfg['non_zero_filter']}{filter_clause}"
         total_rows, _ = self._run_serverless_sql(total_sql)
         total = int(total_rows[0]["cnt"]) if total_rows else pts
         truncated = " (showing first 5,000)" if total > 5000 else ""
